@@ -1,0 +1,8 @@
+data/audio/
+data/analysis/
+data/*.sqlite3
+__pycache__/
+.venv/
+.pytest_cache/
+*_backup.md
+.DS_Store
