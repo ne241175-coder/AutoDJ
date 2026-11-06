@@ -106,3 +106,25 @@ def test_chorus_grace_allows_earlier_exit_only_at_chorus(songs):
     for t, it in zip(loose["transitions"], loose["items"]):
         if it["end"] - it["start"] < 70 - 1e-6:
             assert t["kind"].startswith("サビ終わり"), t
+
+
+def test_replace_old_video_and_partial_csv(tmp_path, monkeypatch):
+    import csv as _csv
+    from backend import fetch_songs
+    from backend.db import connect, get_or_create_set
+    con = connect(tmp_path / "t.sqlite3")
+    sid = get_or_create_set(con, "sheet")
+    for src in ("yt:old", "yt:new"):
+        con.execute("INSERT INTO tracks(title, source_id, file_path, genre, set_id, added_at) VALUES (?,?,?,?,?,?)",
+                    ("曲X", src, f"/x/{src}.mp3", "J-pop", sid, "now"))
+    con.execute("DELETE FROM tracks WHERE source_id='yt:new'")
+    monkeypatch.setattr(fetch_songs, "ANALYSIS_DIR", tmp_path)
+    fetch_songs._replace_old(con, "曲X", "yt:new", sid, log=lambda *_: None)
+    assert con.execute("SELECT COUNT(*) FROM tracks WHERE title='曲X'").fetchone()[0] == 0
+    # 途中までの結果を書いても、まだの曲の行は残る
+    monkeypatch.setattr(fetch_songs, "SHEET_DIR", tmp_path)
+    keep = {"B": {"song": "B", "video_id": "bbb", "title": "", "duration": "", "sheet_end": "", "diff": "", "status": "manual"}}
+    fetch_songs._write_rows([{"song": "A", "video_id": "aaa", "title": "", "duration": "", "sheet_end": "",
+                              "diff": "", "status": "error"}], keep=keep)
+    rows = list(_csv.DictReader(open(tmp_path / "downloads.csv", encoding="utf-8")))
+    assert [r["song"] for r in rows] == ["A", "B"] and rows[1]["status"] == "manual"
