@@ -74,7 +74,8 @@ def load_song(con, key, sheet_structure=None):
         src = "sheet"
     else:
         sections = [{"role": AUTO_ROLE.get(s["role"], "other"), "label": ROLE_JA.get(AUTO_ROLE.get(s["role"], "other")),
-                     "start": s["start"], "end": s["end"]} for s in a["structure"]["sections"]]
+                     "start": s["start"], "end": s["end"], "confidence": s.get("boundary_confidence")}
+                    for s in a["structure"]["sections"]]
         src = "auto"
     return Song(row["id"], row["title"], row["file_path"], a["duration"], a["tempo"]["bpm"],
                 a["key"]["camelot"], a["bars"], sections, src, offset)
@@ -110,23 +111,32 @@ def exit_points(song):
     return out
 
 
-def entry_points(song):
-    """入る位置の候補: サビ頭・曲頭・Aメロ頭"""
-    pts = []
+def entry_points(song, with_order=False):
+    """入る位置の候補: サビ頭・曲頭・Aメロ頭。with_order=True なら (秒, 役割, 何回目か)"""
+    pts, count = [], {}
     for s in song.sections:
-        if s["role"] == "chorus":
-            pts.append((song.snap(s["start"]), "chorus"))
-        elif s["role"] == "verse":
-            pts.append((song.snap(s["start"]), "verse"))
+        if s["role"] in ("chorus", "verse"):
+            count[s["role"]] = count.get(s["role"], 0) + 1
+            pts.append((song.snap(s["start"]), s["role"], count[s["role"]]))
     first = song.sections[0] if song.sections else None
-    pts.append((song.snap(first["start"]) if first else (song.bars[0] if song.bars else 0.0), "start"))
-    return sorted(set(pts))
+    pts.append((song.snap(first["start"]) if first else (song.bars[0] if song.bars else 0.0), "start", 1))
+    # 同じ位置は1つに（曲頭が Aメロ頭と同じ、など → 若い番号・曲頭を残す）
+    uniq = {}
+    for t, r, k in pts:
+        if t not in uniq or r == "start" or k < uniq[t][2]:
+            uniq[t] = (t, r, k)
+    out = sorted(uniq.values())
+    return out if with_order else [(t, r) for t, r, _ in out]
 
 
-TYPE_BONUS = {("chorus", "chorus"): 0.30, ("chorus", "start"): 0.20, ("chorus", "verse"): 0.10,
+TYPE_BONUS = {("chorus", "chorus"): 0.30, ("chorus", "start"): 0.28, ("chorus", "verse"): 0.15,
               # サビ以外で出るのは基本的に不利（Aメロだけ流して終わる、などを避ける）
               ("outro", "start"): 0.05, ("outro", "chorus"): 0.05}
 NON_CHORUS_EXIT_PENALTY = 0.15
+# 入る曲の2回目以降のサビ・Aメロに入るのは、残りが短くなるので少し不利（シートのつなぎメモでは
+# 1回目のサビか曲頭に入るものがほとんど）
+LATER_ENTRY_PENALTY = 0.12
+LENGTH_PENALTY = 0.002   # 最低秒数より長く流すほど少し減点（同じ条件なら早めに次へ）
 DEFAULT_CHORUS_GRACE = 15.0   # サビ終わりで出るときは、最低秒数をこれだけ短くしてよい
 
 
@@ -147,13 +157,15 @@ def candidate_links(a: Song, b: Song, manual=None):
     why = [f"BPM {a.bpm:.0f}→{b.bpm:.0f}", f"Key {a.camelot}→{b.camelot}"]
     links = []
     for xo, ko in exit_points(a):
-        for xi, ki in entry_points(b):
+        for xi, ki, nth in entry_points(b, with_order=True):
             bonus = TYPE_BONUS.get((ko, ki), 0.0) - (0 if ko == "chorus" else NON_CHORUS_EXIT_PENALTY)
-            links.append(Link(xo, xi, base + bonus, f"{ROLE_JA.get(ko, ko)}終わり→{ROLE_JA.get(ki, ki)}頭", why,
-                              out_role=ko))
+            if nth > 1:
+                bonus -= LATER_ENTRY_PENALTY
+            links.append(Link(xo, xi, base + bonus, f"{ROLE_JA.get(ko, ko)}終わり→{'曲の頭' if ki == 'start' else ROLE_JA.get(ki, ki) + '頭'}",
+                              why, out_role=ko))
     if manual:
-        links.append(Link(a.snap(manual["out"]), b.snap(manual["in"]), base + 2.0, "シートのつなぎメモ",
-                          why + ["手動指定"], manual=True))
+        links.append(Link(a.snap(manual["out"]), b.snap(manual["in"]), base + 2.0, manual.get("kind", "シートのつなぎメモ"),
+                          why + [manual.get("why", "手動指定")], manual=True))
     return links
 
 
@@ -173,7 +185,7 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=D
 
     def length_penalty(play):
         # 必要以上に長く流しすぎない（同点なら短い方）
-        return 0.002 * max(0.0, play - min_sec)
+        return LENGTH_PENALTY * max(0.0, play - min_sec)
 
     # DP: best[i][j] = 最初から i 番目のつなぎに候補 j を使ったときの最大スコア
     best = [np.full(len(c), -np.inf) for c in cands]
@@ -226,12 +238,76 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=D
     for i, l in enumerate(chosen):
         a, b = songs[i], songs[i + 1]
         gap = tempo_gap(a.bpm, b.bpm)
+        prev_in = chosen[i - 1].inn if i > 0 else items[0]["start"]
+        next_out = chosen[i + 1].out if i + 1 < len(chosen) else None
         transitions.append({"from": i, "to": i + 1, "out": round(l.out, 3), "in": round(l.inn, 3),
                             "kind": l.kind, "score": round(l.score, 3), "reasons": l.reasons,
                             "manual": l.manual, "tempo_gap": round(gap, 3),
                             # テンポが近ければ1小節かけて混ぜる、遠ければ1拍で切り替える
-                            "overlap_beats": 4 if gap <= 0.06 else 1})
+                            "overlap_beats": 4 if gap <= 0.06 else 1,
+                            "explain": explain_link(a, b, l),
+                            "alternatives": alternatives(cands[i], l, prev_in, next_out, min_sec, chorus_grace, a, b)})
     return {"min_sec": min_sec, "chorus_grace": chorus_grace, "items": items, "transitions": transitions, "warnings": warnings}
+
+
+def _section_at(song, t, edge):
+    """t が区間の終わり（edge="end"）／頭（edge="start"）になっている区間"""
+    best, bd = None, 1e9
+    for idx, x in enumerate(song.sections):
+        v = x["end"] if edge == "end" else x["start"]
+        if v is None:
+            continue
+        d = abs(song.snap(v) - t)
+        if d < bd:
+            best, bd = idx, d
+    return best if bd <= 2.0 else None
+
+
+def _boundary_conf(song, t):
+    """t の位置の区切りの信頼度（自動解析で、学習モデルを使ったときだけ）"""
+    i = _section_at(song, t, "start")
+    if i is None or song.structure_source != "auto":
+        return None
+    c = song.sections[i].get("confidence")
+    return None if c is None else round(float(c), 3)
+
+
+def explain_link(a, b, l):
+    """「なぜここでつなぐか」を画面で説明するための材料"""
+    io, ii = _section_at(a, l.out, "end"), _section_at(b, l.inn, "start")
+    so = a.sections[io] if io is not None else None
+    si = b.sections[ii] if ii is not None else None
+    d = camelot_distance(a.camelot, b.camelot)
+    return {
+        "source": "sheet" if (a.structure_source == "sheet" or b.structure_source == "sheet") else "auto",
+        "out_section": {"label": so["label"], "role": so["role"], "start": so["start"], "end": so["end"]} if so else None,
+        "in_section": {"label": si["label"], "role": si["role"], "start": si["start"], "end": si["end"]} if si else None,
+        "tempo": {"a": round(a.bpm, 1), "b": round(b.bpm, 1), "gap": round(tempo_gap(a.bpm, b.bpm), 3),
+                  "score": round(tempo_score(a.bpm, b.bpm), 2)},
+        "key": {"a": a.camelot, "b": b.camelot, "distance": d, "score": key_score(a.camelot, b.camelot)},
+        "confidence": {"out": _boundary_conf(a, l.out), "in": _boundary_conf(b, l.inn)},
+        "structure": {"a": a.structure_source, "b": b.structure_source},
+    }
+
+
+def alternatives(cands, chosen, prev_in, next_out, min_sec, chorus_grace, a, b, n=4):
+    """選ばれなかった候補のうち、前後の曲の条件を満たすもの（スコア順）"""
+    out, seen = [], {(round(chosen.out, 1), round(chosen.inn, 1))}
+    for l in sorted(cands, key=lambda x: -x.score):
+        key = (round(l.out, 1), round(l.inn, 1))
+        if key in seen:
+            continue
+        need = max(0.0, min_sec - chorus_grace) if l.out_role == "chorus" else min_sec
+        if l.out - prev_in < need and not l.manual:
+            continue
+        if next_out is not None and next_out - l.inn <= 0:
+            continue
+        seen.add(key)
+        out.append({"out": round(l.out, 3), "in": round(l.inn, 3), "kind": l.kind, "score": round(l.score, 3),
+                    "manual": l.manual})
+        if len(out) >= n:
+            break
+    return out
 
 
 def first_start(song, exit_t, min_sec):
@@ -299,17 +375,63 @@ def apply_styles(plan, styles):
 
 
 def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_grace=DEFAULT_CHORUS_GRACE,
-               styles=None):
-    """keys: 曲名 or track_id のリスト（曲順）。シートのつなぎメモがあれば自動で使う"""
+               styles=None, links=None):
+    """keys: 曲名 or track_id のリスト（曲順）。シートのつなぎメモがあれば自動で使う。
+    use_sheet=False なら、構造もつなぎ位置もすべて自動検知（シートの手入力はお手本として比べるだけ）。
+    links: {つなぎ目の番号: {"out": 秒, "in": 秒}} 画面で選び直した候補（最優先）"""
     con = con or connect()
     structure, lst = ({}, {"routes": []})
-    if use_sheet:
-        try:
-            from .sheet import load_cached
-            structure, lst = load_cached()
-        except FileNotFoundError:
-            pass
+    try:
+        from .sheet import load_cached
+        structure, lst = load_cached()
+    except FileNotFoundError:
+        pass
+    sheet_lst = lst
+    if not use_sheet:
+        structure, lst = {}, {"routes": []}
     songs = [load_song(con, k, structure) for k in keys]
+    plan = _build(songs, lst, min_sec, chorus_grace, links)
+    _attach_reference(plan, songs, sheet_lst, con)
+    return apply_styles(plan, styles)
+
+
+def _attach_reference(plan, songs, lst, con):
+    """シートに人が書いたつなぎメモがあれば、自動検知との差を出せるように添える（音源の時刻に合わせて）"""
+    try:
+        from .sheet import load_cached
+        structure, _ = load_cached()
+    except FileNotFoundError:
+        structure = {}
+    from .align import aligned_sections
+    offs = {}
+    for s in songs:
+        sh = structure.get(s.title)
+        a = load_analysis(s.track_id) if sh else None
+        offs[s.title] = aligned_sections(sh, a)[1] if (sh and a) else 0.0
+    for t in plan["transitions"]:
+        a, b = songs[t["from"]], songs[t["to"]]
+        ref = None
+        for r in lst.get("routes", []):
+            if r["middle"] == a.title and r["leaf"] == b.title and r.get("link_mid_leaf"):
+                ref = r["link_mid_leaf"]
+            if r["root"] == a.title and r["middle"] == b.title and r.get("link_root_mid"):
+                ref = r["link_root_mid"]
+        if ref:
+            ro, ri = ref["out"] + offs[a.title], ref["in"] + offs[b.title]
+            h = {"out": round(ro, 3), "in": round(ri, 3),
+                 "diff_out": round(t["out"] - ro, 2), "diff_in": round(t["in"] - ri, 2)}
+            # 自動検知した候補の中に、人が決めた位置があるか（一番近い候補と、その順位）
+            cands = sorted(candidate_links(a, b), key=lambda x: -x.score)
+            if cands:
+                j = int(np.argmin([abs(c.out - ro) + abs(c.inn - ri) for c in cands]))
+                c = cands[j]
+                h["nearest"] = {"out": round(c.out, 3), "in": round(c.inn, 3), "kind": c.kind,
+                                "diff_out": round(c.out - ro, 2), "diff_in": round(c.inn - ri, 2),
+                                "rank": j + 1, "of": len(cands)}
+            t["human"] = h
+
+
+def _build(songs, lst, min_sec, chorus_grace, links):
     manual = {}
     for i in range(len(songs) - 1):
         a, b = songs[i].title, songs[i + 1].title
@@ -323,7 +445,10 @@ def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_g
                 # つなぎメモもシートの秒数なので、それぞれの曲のズレを足す
                 manual[(i, i + 1)] = {"out": link["out"] + songs[i].sheet_offset,
                                       "in": link["in"] + songs[i + 1].sheet_offset}
-    return apply_styles(plan_chain(songs, min_sec=min_sec, manual_links=manual, chorus_grace=chorus_grace), styles)
+    for k, v in (links or {}).items():
+        manual[(int(k), int(k) + 1)] = {"out": float(v["out"]), "in": float(v["in"]),
+                                        "kind": v.get("kind", "選んだ候補"), "why": "画面で選び直し"}
+    return plan_chain(songs, min_sec=min_sec, manual_links=manual, chorus_grace=chorus_grace)
 
 
 def save_plan(plan, path):

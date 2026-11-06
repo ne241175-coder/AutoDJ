@@ -4,13 +4,15 @@
 
 API（UI を差し替えてもこのまま使える）
   GET  /api/tracks              曲一覧（BPM・キー・解析済みか・シートの構成があるか）
-  GET  /api/tracks/<id>         1曲の詳細（区間・小節頭・キー候補）
+  GET  /api/tracks/<id>         1曲の詳細（区間・小節頭・キー候補）。?auto=1 で自動検知の区間だけ
   GET  /api/audio/<id>          mp3 そのもの（Range対応。ブラウザが必要な部分だけ取りに来る）
   GET  /api/routes              シートの「ルート曲→中間曲→曲名」とつなぎメモ
   GET  /api/tracks/<id>/wave    波形（ピーク値の列。初回だけ計算して保存）
   GET  /api/jacket/<id>         ジャケット画像（data/jackets/曲名.jpg があればそれ、なければ動画のサムネイル）
   POST /api/plan                {"songs": [id or 曲名...], "min_sec": 90, "chorus_grace": 15,
-                                 "styles": ["fade", "cut", ...]} → 再生計画
+                                 "styles": ["fade", "cut", ...], "use_sheet": false（＝すべて自動検知）,
+                                 "links": {"0": {"out": 秒, "in": 秒}}（候補の選び直し）} → 再生計画
+                                 transitions[].explain（なぜここか）/ alternatives（ほかの候補）/ human（シートのメモ）
   POST /api/tracks/<id>/analyze 解析を（再）実行
 """
 import json
@@ -112,6 +114,8 @@ def track(tid):
         abort(404)
     a = load_analysis(tid)
     structure, _ = _sheet()
+    if request.args.get("auto"):          # 自動検知の構造だけを見る（シートの手入力を使わない）
+        structure = {}
     src, sections = _sections(r, a, structure)
     return jsonify({
         "id": tid, "title": r["title"], "duration": a["duration"] if a else r["duration"],
@@ -195,7 +199,8 @@ def plan():
         return jsonify({"error": "2曲以上選んでください"}), 400
     try:
         p = build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
-                       chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"))
+                       chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"),
+                       links=body.get("links"))
     except (KeyError, RuntimeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     for it in p["items"]:
