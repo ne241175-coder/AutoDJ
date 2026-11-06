@@ -432,7 +432,7 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
   // 「サビ終わり→サビ頭」を左右に分ける（シートのメモなど「→」が無いときは区間名か「指定の位置」）
   const parts = t.kind.includes("→") ? t.kind.split("→")
     : [ex.out_section ? `${ex.out_section.label}終わり` : "指定の位置", ex.in_section ? `${ex.in_section.label}頭` : "指定の位置"];
-  const nAlt = h && h.nearest ? 2 : 3;
+  const nAlt = h && h.nearest ? 2 : 4;
   return html`<div class="explain">
     <div class="ex-head">
       <span class="badge" style=${{ background: auto ? "#ffe600" : "#7be0a4" }}>${auto ? "自動検知" : "シートの手入力を使用"}</span>
@@ -453,8 +453,10 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
       <div class="ex-right">
         <div class="why"><span>テンポ</span><b>${tempo.a} → ${tempo.b} BPM</b><em>${tempoMark} 差 ${(tempo.gap * 100).toFixed(1)}%</em></div>
         <div class="why"><span>キー</span><b>${key.a} → ${key.b}</b><em>${keyMark}</em></div>
+        ${ex.energy && ex.energy.out != null && html`<div class="why"><span>音の勢い</span>
+          <b>${pct(ex.energy.out)} → ${pct(ex.energy.in)}</b><em>${ex.energy.fit >= 0.8 ? "◎" : ex.energy.fit >= 0.5 ? "○" : "△"} つながり ${pct(ex.energy.fit)}</em></div>`}
         ${auto && html`<div class="why"><span>区切りの確かさ</span><b>出 ${pct(ex.confidence && ex.confidence.out)} / 入 ${pct(ex.confidence && ex.confidence.in)}</b>
-          <em>学習モデルの信頼度</em></div>`}
+          </div>`}
         ${h && html`<div class="why human"><span>人のメモ</span><b>${fmt(h.out)} → ${fmt(h.in)}</b>
           <em>${h.nearest ? `自動の候補で一番近いもの: 差 ${Math.abs(h.nearest.diff_out).toFixed(1)}秒 / ${Math.abs(h.nearest.diff_in).toFixed(1)}秒` : ""}</em></div>`}
         <button class="listen-btn" onClick=${() => onPreview(k)}>${previewing ? "■ 止める" : "▶ このつなぎを試聴"}</button>
