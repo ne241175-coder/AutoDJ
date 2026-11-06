@@ -31,3 +31,21 @@ def test_learn_on_synthetic(tmp_path):
     m, _ = train_and_save(data, 0.75, path=tmp_path / "model.json", cv=cv)
     saved = json.loads((tmp_path / "model.json").read_text(encoding="utf-8"))
     assert saved["feature_names"] == FEATURE_NAMES and len(saved["coef"]) == len(FEATURE_NAMES)
+
+
+def test_estimate_offset(tmp_path):
+    from backend.align import estimate_offset, aligned_sections
+    y, truth = make_track(bpm=118.0, tonic=7, mode="major")
+    p = tmp_path / "a.wav"
+    sf.write(p, y, SR)
+    a = analyze_file(p)
+    bar = 240.0 / 118.0
+    audio_times = [truth["first_downbeat"] + b * bar for b in truth["boundaries"][:-1]]
+    for shift in (7.3, -4.0, 0.0):
+        # シートは「音源より shift 秒だけ前（後）」で計った、という状況
+        sheet = [{"start": t - shift, "end": None, "role": "verse", "label": "A"} for t in audio_times]
+        est = estimate_offset(sheet, a)
+        assert abs(est["offset"] - shift) <= 0.6, (shift, est)
+    secs, off = aligned_sections({"sections": [{"start": t - 7.3, "end": t, "role": "verse", "label": "A"}
+                                               for t in audio_times], "end": None}, a)
+    assert abs(off - 7.3) <= 0.6 and abs(secs[1]["start"] - audio_times[1]) <= 0.6

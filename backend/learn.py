@@ -34,10 +34,13 @@ def collect_truth(con=None, truth_json=None):
         structure, _ = load_cached()
     except FileNotFoundError:
         structure = {}
+    from .align import aligned_sections
     for name, s in structure.items():
         row = con.execute("SELECT id FROM tracks WHERE title=?", (name,)).fetchone()
-        if row:
-            out[row["id"]] = [x["start"] for x in s["sections"]]
+        a = load_analysis(row["id"]) if row else None
+        if a is not None:
+            secs, _ = aligned_sections(s, a)   # 計測した動画と音源のズレを補正
+            out[row["id"]] = [x["start"] for x in secs]
     if truth_json and Path(truth_json).exists():
         for t in json.loads(Path(truth_json).read_text(encoding="utf-8")):
             if t.get("sections"):
