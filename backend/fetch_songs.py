@@ -168,3 +168,39 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
         w.writeheader()
         w.writerows(rows)
     return rows
+
+
+def video_id_from(url_or_id):
+    """https://youtu.be/XXXX / https://www.youtube.com/watch?v=XXXX / XXXX → XXXX"""
+    m = re.search(r"(?:v=|youtu\.be/|shorts/)([A-Za-z0-9_-]{11})", url_or_id)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", url_or_id.strip()):
+        return url_or_id.strip()
+    raise ValueError(f"YouTube の URL か動画IDとして読めません: {url_or_id}")
+
+
+def set_manual(song, url_or_id):
+    """downloads.csv のその曲の行を「手動指定」にする（次の sheet-fetch でこの動画を使う）"""
+    _, lst = load_cached()
+    if song not in lst["songs"]:
+        near = [n for n in lst["songs"] if song in n or n in song]
+        raise ValueError(f"シートに「{song}」がありません" + (f"（候補: {', '.join(near)}）" if near else ""))
+    vid = video_id_from(url_or_id)
+    p = SHEET_DIR / "downloads.csv"
+    fields = ["song", "video_id", "title", "duration", "sheet_end", "diff", "status"]
+    rows = list(csv.DictReader(open(p, encoding="utf-8"))) if p.exists() else []
+    for r in rows:
+        if r["song"] == song:
+            r.update(video_id=vid, title="(手動指定)", duration="", diff="", status="manual")
+            break
+    else:
+        rows.append({"song": song, "video_id": vid, "title": "(手動指定)", "duration": "",
+                     "sheet_end": "", "diff": "", "status": "manual"})
+    SHEET_DIR.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+    return vid
+
