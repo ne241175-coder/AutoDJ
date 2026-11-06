@@ -125,6 +125,12 @@ def cmd_sheet_fetch(a):
     print(f"--- {ok}/{len(rows)} 曲。選んだ動画は data/sheet/downloads.csv（違えば video_id を正しいIDに、status を manual にして再実行）")
 
 
+def cmd_sheet_pick(a):
+    from .fetch_songs import set_manual
+    vid = set_manual(a.song, a.url)
+    print(f"「{a.song}」→ 動画 {vid} を手動指定しました。sheet-fetch --only \"{a.song}\" でダウンロードできます")
+
+
 def cmd_plan(a):
     from .mixplan import build_plan, describe, save_plan
     plan = build_plan(a.songs, min_sec=a.min_sec, use_sheet=not a.no_sheet)
@@ -203,6 +209,11 @@ def main(argv=None):
     s.add_argument("--dry-run", action="store_true", help="選ぶ動画を表示するだけ")
     s.add_argument("--reselect", action="store_true", help="取り込み済みの曲も選び直す（status=manual の行は維持）")
     s.set_defaults(fn=cmd_sheet_fetch)
+
+    s = sub.add_parser("sheet-pick", help="ある曲に使う YouTube 動画を手で指定する")
+    s.add_argument("song", help="シートの曲名（例: 青成功でいいじゃない）")
+    s.add_argument("url", help="YouTube の URL または動画ID")
+    s.set_defaults(fn=cmd_sheet_pick)
 
     s = sub.add_parser("plan", help="曲順からつなぎ位置と再生区間を決める（ファイルは切らない）")
     s.add_argument("songs", nargs="+", help="曲名 または ID（流す順）")
