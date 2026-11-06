@@ -97,3 +97,40 @@ def evaluate(truth_path):
     if fs:
         summary.append(f"境界F値 平均 {np.mean(fs):.2f}")
     return "\n".join(rows + ["---"] + summary)
+
+
+def evaluate_sheet(con=None):
+    """シート（構成入力）を正解として、自動解析の構造を採点する。
+    - 境界: 自動の区間頭がシートの区間頭と ±3秒以内で一致するか（適合率P・再現率R・F値）
+    - サビ: シートのサビ頭のうち、自動で「chorus」と判定した区間頭が ±3秒以内にあるものの割合
+    - BPM/Key はシートに正解がないので出さない（曲リストのルート情報は別曲のため）"""
+    from .db import connect
+    from .sheet import load_cached
+    con = con or connect()
+    structure, _ = load_cached()
+    rows, fs, cr = [], [], []
+    for name, truth in structure.items():
+        row = con.execute("SELECT id FROM tracks WHERE title=?", (name,)).fetchone()
+        a = load_analysis(row["id"]) if row else None
+        if a is None:
+            rows.append(f"{name}: 未取り込み/未解析")
+            continue
+        ref = [s["start"] for s in truth["sections"]][1:]   # 0秒の頭は自明なので除く
+        auto = a["structure"]["sections"]
+        est = [s["start"] for s in auto][1:]
+        p, r, f = boundary_prf(est, ref, tol=3.0)
+        fs.append(f)
+        ref_ch = [s["start"] for s in truth["sections"] if s["role"] == "chorus"]
+        est_ch = np.array([s["start"] for s in auto if s["role"] == "chorus"])
+        hit = sum(1 for t in ref_ch if len(est_ch) and np.min(np.abs(est_ch - t)) <= 3.0)
+        rate = hit / len(ref_ch) if ref_ch else float("nan")
+        if ref_ch:
+            cr.append(rate)
+        rows.append(f"{name}: 区間数 自動{len(auto)}/正解{len(truth['sections'])}  "
+                    f"境界 P={p:.2f} R={r:.2f} F={f:.2f}  サビ検出 {hit}/{len(ref_ch)}")
+    summary = []
+    if fs:
+        summary.append(f"境界F値 平均 {np.mean(fs):.2f}（{len(fs)}曲, 許容±3秒）")
+    if cr:
+        summary.append(f"サビ頭の検出率 平均 {np.mean(cr):.0%}")
+    return "\n".join(rows + ["---"] + summary)
