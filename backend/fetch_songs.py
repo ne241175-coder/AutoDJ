@@ -9,7 +9,7 @@ import csv
 import re
 from pathlib import Path
 
-from .config import AUDIO_DIR
+from .config import ANALYSIS_DIR, AUDIO_DIR
 from .db import connect, get_or_create_set
 from .ingest import _ydl_opts, _register
 from .sheet import SHEET_DIR, load_cached
@@ -196,8 +196,17 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
                 con.execute("UPDATE tracks SET title=? WHERE source_id=?", (name, f"yt:{pick['id']}"))
                 con.commit()
             elif not dry_run:
-                info = yd.extract_info(f"https://www.youtube.com/watch?v={pick['id']}", download=True)
+                try:
+                    info = yd.extract_info(f"https://www.youtube.com/watch?v={pick['id']}", download=True)
+                except Exception as e:   # 1曲の失敗で全体を止めない
+                    log(f"   ↳ ダウンロード失敗: {str(e).splitlines()[0][:160]}（もう一度 sheet-fetch すると再挑戦します）")
+                    rows.append({"song": name, "video_id": pick["id"], "title": pick.get("title", ""),
+                                 "duration": pick.get("duration", ""), "sheet_end": target or "",
+                                 "diff": diff, "status": "error"})
+                    _write_rows(rows)
+                    continue
                 path = AUDIO_DIR / f"{info['id']}.mp3"
+                _replace_old(con, name, f"yt:{info['id']}", set_id, log)
                 _register(con, title=name, artist=None, url=info.get("webpage_url"),
                           source_id=f"yt:{info['id']}", path=path, genres=["J-pop"],
                           set_id=set_id, duration=info.get("duration"))
@@ -205,13 +214,38 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
             rows.append({"song": name, "video_id": pick["id"], "title": pick.get("title", ""),
                          "duration": pick.get("duration", ""), "sheet_end": target or "",
                          "diff": diff, "status": status})
+            _write_rows(rows, keep=overrides)   # 途中で止まっても、そこまでの結果は残す
 
-    SHEET_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SHEET_DIR / "downloads.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["song", "video_id", "title", "duration", "sheet_end", "diff", "status"])
-        w.writeheader()
-        w.writerows(rows)
+    _write_rows(rows)
+    errors = [r["song"] for r in rows if r["status"] == "error"]
+    if errors:
+        log(f"※ ダウンロードに失敗した曲: {', '.join(errors)}（もう一度 sheet-fetch を実行してください）")
     return rows
+
+
+def _write_rows(rows, keep=None):
+    """downloads.csv を書く。keep があれば、まだ処理していない曲の行は元のまま残す"""
+    SHEET_DIR.mkdir(parents=True, exist_ok=True)
+    done = {r["song"] for r in rows}
+    out = list(rows) + [r for n, r in (keep or {}).items() if n not in done]
+    with open(SHEET_DIR / "downloads.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["song", "video_id", "title", "duration", "sheet_end", "diff", "status"],
+                           extrasaction="ignore")
+        w.writeheader()
+        w.writerows(out)
+
+
+def _replace_old(con, title, source_id, set_id, log=print):
+    """同じ曲名で別の動画を取り込み済みなら、その行を消して新しい動画に置き換える（重複させない）"""
+    olds = con.execute("SELECT id, file_path, source_id FROM tracks WHERE title=? AND set_id=? AND source_id<>?",
+                       (title, set_id, source_id)).fetchall()
+    for o in olds:
+        con.execute("DELETE FROM tracks WHERE id=?", (o["id"],))
+        a = ANALYSIS_DIR / f"{o['id']}.json"
+        if a.exists():
+            a.unlink()
+        log(f"   ↳ 以前の動画（{o['source_id']}）を置き換えました")
+    con.commit()
 
 
 def video_id_from(url_or_id):
