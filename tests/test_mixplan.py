@@ -80,3 +80,15 @@ def test_sheet_parsing():
     assert r["リライト"]["link_mid_leaf"] == {"out": 111, "in": 75}
     assert r["全力少年"]["link_mid_leaf"] is None
     assert l["songs"]["前前前世"] == "前前前世 RADWIMPS"
+
+
+def test_video_tab_and_strict_title():
+    from backend.fetch_songs import choose, video_id_from
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "videos.csv").write_text("曲名,動画URL\nリライト,https://youtu.be/omkKMzR_vZY?si=x\n空欄,\n", encoding="utf-8")
+    assert sheet.parse_videos(d / "videos.csv") == {"リライト": "omkKMzR_vZY"}
+    # 長さが一致しても、Topic 以外で曲名がタイトルにない動画は選ばない
+    E = [{"id": "k", "title": "Kagerou", "duration": 248, "channel": "ONE OK ROCK"}]
+    assert choose(E, 248, "ONE OK ROCK", "完全感覚Dreamer") is None
+    assert choose([{"id": "m", "title": "【432Hz】ポリリズム", "duration": 252, "channel": "x"}], 252, "Perfume", "ポリリズム") is None

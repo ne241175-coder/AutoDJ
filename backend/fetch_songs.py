@@ -18,7 +18,8 @@ BAD_WORDS = re.compile(r"(live|ライブ|cover|カバー|歌ってみた|弾い�
                        r"instrumental|off vocal|short|切り抜き|remix|nightcore|slowed|sped up|piano|replica|"
                        r"dance practice|dance ver|mirrored|staff ver|movie edit|tv size|tv ver|8d|reaction|"
                        r"原曲歌手|[+-]\s?\d\s?key|キー|ガイドメロディ|オルゴール|music box|from [a-z0-9]|オーケストラ|acoustic|"
-                       r"令和ver|re-?record|self cover|セルフカバー)", re.I)
+                       r"令和ver|re-?record|self cover|セルフカバー|432\s?hz|440\s?hz|【mad】|\bmad\b|ボーカル音源|vocal only|"
+                       r"歌割り|パート分け|アカペラ|a ?cappella)", re.I)
 GOOD_WORDS = re.compile(r"(official|music video|公式|provided to youtube)", re.I)
 TOLERANCE = 4.0      # 秒: シートの長さとの許容差
 MIN_DUR_NO_TARGET = 150  # シートに長さがない曲は、短すぎる同名曲を避けるため 2:30 以上に限る
@@ -61,6 +62,10 @@ def score_candidate(entry, target_sec, artist="", song=""):
     # 長さが偶然一致した別の曲（例: 完全感覚Dreamer → Kagerou）を避けるため、
     # 曲名かアーティスト名のどちらかがタイトル／チャンネル名に入っていることを必須にする
     if song and not (match or name_match(entry, song)):
+        return None
+    # シートに長さがある曲で、Topic 以外は曲名がタイトルに入っていることを必須にする
+    # （同じアーティストの別の曲で長さが偶然一致したもの: 完全感覚Dreamer → Kagerou を防ぐ）
+    if song and target_sec and not is_topic(entry) and not name_match(entry, song):
         return None
     s = 0.0
     if target_sec:
@@ -145,6 +150,10 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
             keep = ("manual", "not_found") if reselect else ("manual", "not_found", "downloaded", "already")
             if ov.get("status") not in keep:
                 vid = ""
+            # スプレッドシートの「動画URL」タブ（計測に使った動画）を最優先。sheet-pick の手動指定はさらに優先
+            sheet_vid = lst.get("videos", {}).get(name)
+            if sheet_vid and ov.get("status") != "manual":
+                vid = sheet_vid
             pick = None
             if vid:
                 # 手動指定: タイトルと長さを取りに行って表示する（取れなくてもそのまま使う）
@@ -176,7 +185,8 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
             sheet_len = f"シート {target:.0f}秒" if target else "シートに長さなし"
             topic = " [Topic=アルバム音源]" if is_topic(pick) else ""
             if vid:
-                log(f"○ {name}: 手動指定の動画 https://youtu.be/{vid}（長さはダウンロード時に確認）")
+                src = "シートの動画URL" if vid == lst.get("videos", {}).get(name) else "手動指定"
+                log(f"○ {name}: {src} https://youtu.be/{vid}（長さはダウンロード時に確認）")
             else:
                 log(f"○ {name}: {pick['title']}{topic} ({pick.get('duration')}秒, {sheet_len})")
             status = "selected"
