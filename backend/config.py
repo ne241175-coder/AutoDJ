@@ -14,7 +14,7 @@ GENRES = ["J-pop", "Rock", "Funk", "Fusion", "Jazz", "Classic", "Electro"]
 SR = 22050            # 解析用サンプルレート
 ONSET_HOP = 256       # ビート検出用（約11.6ms）
 FEAT_HOP = 512        # 特徴量用（約23ms）
-ANALYZER_VERSION = "0.1.0"
+ANALYZER_VERSION = "0.2.0"
 SCHEMA_VERSION = 1
 
 for d in (AUDIO_DIR, ANALYSIS_DIR):

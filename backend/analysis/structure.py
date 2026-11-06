@@ -88,11 +88,9 @@ def detect_boundaries(nov, n_bars, min_len=4, grid=4):
     return [0] + bounds + [n_bars], offset, snapped
 
 
-def split_long_sections(bounds, nov, offset8, strength, max_len=16):
-    """フレーズの事前知識: ポップスのセクションは多くが8/16小節。
-    16小節を超える区間は、内部の8小節グリッド上で新規性が最大の点で分割する
-    （ただし、その点にある程度の変化があること）。"""
-    floor = np.median(nov) + 0.25 * nov.std()
+def split_long_sections(bounds, nov, offset8, strength, max_len=16, min_len=4):
+    """フレーズの事前知識: ポップスの区間は多くが 10〜32 秒（シート25曲の実測、中央値19秒）。
+    max_len 小節を超える区間は、内部の8小節グリッド（なければ4小節）上で新規性が最大の点で必ず分割する。"""
     out = list(bounds)
     changed = True
     while changed:
@@ -100,8 +98,9 @@ def split_long_sections(bounds, nov, offset8, strength, max_len=16):
         for a, b in zip(out[:-1], out[1:]):
             if b - a <= max_len:
                 continue
-            cands = [c for c in range(a + 8, b - 7) if (c - offset8) % 8 == 0]
-            cands = [c for c in cands if nov[c] >= floor]
+            cands = [c for c in range(a + min_len, b - min_len + 1) if (c - offset8) % 8 == 0]
+            if not cands:
+                cands = [c for c in range(a + min_len, b - min_len + 1) if (c - offset8) % 4 == 0]
             if not cands:
                 continue
             c = max(cands, key=lambda c: nov[c])
@@ -110,6 +109,27 @@ def split_long_sections(bounds, nov, offset8, strength, max_len=16):
             changed = True
             break
     return out
+
+
+def repetition_score(C, min_lag=8, span=4):
+    """各小節について「曲中の別の場所（min_lag 小節以上離れた所）に、同じ和声の流れが span 小節続けて
+    現れるか」の強さ。サビは同じメロディ・コード進行を何度も繰り返すので高くなる。
+    C: 小節ごとの正規化クロマ (12 x n)"""
+    n = C.shape[1]
+    S = C.T @ C
+    rep = np.zeros(n)
+    for i in range(n):
+        best = 0.0
+        for j in range(n):
+            if abs(i - j) < min_lag:
+                continue
+            k = min(span, n - i, n - j)
+            if k < 2:
+                continue
+            v = np.mean([S[i + t, j + t] for t in range(k)])
+            best = max(best, v)
+        rep[i] = best
+    return rep
 
 
 def _group_sections(seg_feats, thresh=0.3):
@@ -141,24 +161,42 @@ def assign_roles(sections):
     n = len(sections)
     e = np.array([s["energy"] for s in sections])
     low = np.array([s["low_energy"] for s in sections])
+    rep = np.array([s.get("repetition", 0.0) for s in sections])
     med = np.median(e)
+
+    def z(x):
+        return (x - x.mean()) / (x.std() + 1e-9)
+
+    # 区間ごとの「サビらしさ」= 繰り返し度と音量（シート25曲では サビ=最も繰り返され、音量も大きい）
+    score = 0.55 * z(rep) + 0.45 * z(e)
+    for s, sc in zip(sections, score):
+        s["chorus_score"] = round(float(sc), 3)
     groups = {}
-    for s in sections:
-        groups.setdefault(s["group"], []).append(s["energy"])
-    # サビ/ドロップ = 2回以上出現するグループのうち最も音量が大きいもの
-    rep = {g: np.mean(v) for g, v in groups.items() if len(v) >= 2}
-    chorus_group = max(rep, key=rep.get) if rep else max(groups, key=lambda g: np.mean(groups[g]))
+    for i, s in enumerate(sections):
+        groups.setdefault(s["group"], []).append(i)
+
+    def group_value(idx):
+        v = float(np.mean(score[idx]))
+        if 2 <= len(idx) <= 4:      # サビは 2〜4 回（シートでは3回が最多）
+            v += 0.3
+        if idx and min(idx) == 0:   # 曲頭から始まるグループはイントロの可能性が高い
+            v -= 0.2
+        return v
+
+    chorus_group = max(groups, key=lambda g: group_value(groups[g]))
+    gmean = float(np.mean(score[groups[chorus_group]]))
 
     for i, s in enumerate(sections):
         role = "verse"
-        if s["group"] == chorus_group and s["energy"] >= med:
+        if (s["group"] == chorus_group and s["energy"] >= med) or \
+                (score[i] >= gmean and s["energy"] >= med and s["bars"] >= 6):
             role = "chorus"
         if 0 < i < n - 1:
             neighbors = max(e[i - 1], e[i + 1])
             if e[i] < neighbors - 0.12 and low[i] < np.median(low):
                 role = "break"
             elif (e[i + 1] > e[i] + 0.08 and s["energy_slope"] > 0.05
-                  and sections[i + 1]["group"] == chorus_group):
+                  and sections[i + 1]["group"] == chorus_group and role != "chorus"):
                 role = "build"
         if i == 0 and (e[0] < med or low[0] < np.median(low)):
             role = "intro"
@@ -205,7 +243,9 @@ def analyze_structure(bars_t, duration, frame_times, feats):
         return cands[int(np.argmax(score))] % period
     offset8 = pick(offset, 8)
     offset16 = pick(offset8, 16)
-    bounds = split_long_sections(bounds, nov, offset8, strength)
+    max_bars = max(8, 4 * int(round(32.0 / bar_len / 4)))   # 約32秒（4小節単位）
+    bounds = split_long_sections(bounds, nov, offset8, strength, max_len=max_bars)
+    rep = repetition_score(ch)
 
     # 0〜1に正規化した小節エネルギー（曲内相対）
     def rel(x):
@@ -229,6 +269,7 @@ def analyze_structure(bars_t, duration, frame_times, feats):
             "on_grid4": bool((a - offset) % 4 == 0),
             "on_grid8": bool((a - offset8) % 8 == 0),
             "on_grid16": bool((a - offset16) % 16 == 0),
+            "repetition": round(float(rep[a:b].mean()), 3),
         })
     for s, g in zip(sections, _group_sections(seg_feats)):
         s["group"] = g
