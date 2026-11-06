@@ -161,7 +161,7 @@ def cmd_sheet_eval(a):
 
 def cmd_learn(a):
     from .learn import learn
-    learn(truth_json=a.truth, threshold=a.threshold)
+    learn(truth_json=a.truth, threshold=a.threshold, min_confidence=a.min_confidence)
 
 
 def main(argv=None):
@@ -241,7 +241,10 @@ def main(argv=None):
 
     s = sub.add_parser("learn", help="シートの構成（と truth.json）を正解に、区切り確率モデルを学習する")
     s.add_argument("--truth", help="truth.json（任意。シートの構成に加えて使う）")
-    s.add_argument("--threshold", type=float, default=0.75, help="この確率未満の区切りは採らない（既定0.75）")
+    s.add_argument("--threshold", type=float, default=None,
+                   help="この確率未満の区切りは採らない（既定: 答え合わせで一番良い値を自動で選ぶ）")
+    s.add_argument("--min-confidence", type=float, default=0.0,
+                   help="信頼度（正解の見込み）がこれ未満の区切りを捨てる。例 0.75（既定0 = 捨てない）")
     s.set_defaults(fn=cmd_learn)
 
     s = sub.add_parser("genres", help="使えるジャンル一覧")

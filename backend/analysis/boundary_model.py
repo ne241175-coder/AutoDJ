@@ -5,6 +5,9 @@
 - 境界どうしは最低 min_gap 小節あける
 - 区間数は上限（MAX_SECTIONS）まで
 モデルはロジスティック回帰（特徴量の重み付き和 → 0〜1 の確率）。正解データから `learn` で学習する。
+v0.3: 小節ごとの特徴量に extra_features の22個を足し、さらに前後2小節の特徴量も並べて判断する。
+確率は「その小節がちょうど区切り」の確率なので値は小さめ。採った境界には、学習時の答え合わせから
+求めた「信頼度」（その境界が正解の±3秒以内に入っている割合）を付ける。
 """
 import json
 from pathlib import Path
@@ -12,9 +15,11 @@ from pathlib import Path
 import numpy as np
 
 from ..config import DATA_DIR
+from .extra_features import EXTRA_NAMES
 
 MODEL_PATH = DATA_DIR / "model" / "boundary.json"
-FEATURE_NAMES = [
+CONTEXT = 2   # 前後何小節の特徴量も並べるか
+BASE_NAMES = [
     "novelty_4bar",      # 音色・和声の変化（前後4小節の比較）
     "novelty_8bar",      # 同（前後8小節）
     "energy_step",       # 音量の段差
@@ -24,6 +29,17 @@ FEATURE_NAMES = [
     "on_grid4", "on_grid8", "on_grid16",   # 4/8/16小節の区切りに乗っているか
     "position",          # 曲中の位置（0〜1）
 ]
+FEATURE_NAMES = BASE_NAMES + EXTRA_NAMES
+
+
+def with_context(F, k=CONTEXT):
+    """各小節の特徴量に、前後 k 小節の特徴量を並べる（端は0で埋める）"""
+    F = np.asarray(F, float)
+    cols = [F]
+    for d in range(1, k + 1):
+        cols.append(np.vstack([np.zeros((d, F.shape[1])), F[:-d]]))
+        cols.append(np.vstack([F[d:], np.zeros((d, F.shape[1]))]))
+    return np.hstack(cols)
 
 
 def bar_features(foote4, foote8, energy_step, lowperc_step, chroma, rep, offsets, n):
@@ -63,9 +79,18 @@ def load_model(path=MODEL_PATH):
 
 
 def predict(model, F):
-    X = (np.asarray(F) - np.array(model["mean"])) / np.array(model["std"])
+    X = with_context(F, model.get("context", 0))
+    X = (X - np.array(model["mean"])) / np.array(model["std"])
     z = X @ np.array(model["coef"]) + model["intercept"]
     return 1 / (1 + np.exp(-z))
+
+
+def confidence(model, p):
+    """確率 → 信頼度（学習時の答え合わせで「採った境界が正解だった割合」に直したもの）"""
+    cal = model.get("calibration")
+    if not cal:
+        return float(p)
+    return float(np.interp(p, cal["x"], cal["y"]))
 
 
 def pick_boundaries(prob, threshold=0.75, min_gap=4, max_sections=14):

@@ -222,10 +222,11 @@ def assign_roles(sections):
     return sections
 
 
-def analyze_structure(bars_t, duration, frame_times, feats):
+def analyze_structure(bars_t, duration, frame_times, feats, extra=None):
     """
     bars_t: 小節頭の時刻配列
     feats: dict(chroma(12xF), mfcc(13xF), rms_db(F), low_db(F), perc_ratio(F))
+    extra: 小節ごとの追加特徴量（extra_features.extra_bar_features、無ければ0）
     """
     starts = np.asarray(bars_t, float)
     if len(starts) < 8:
@@ -266,14 +267,23 @@ def analyze_structure(bars_t, duration, frame_times, feats):
     rep = repetition_score(ch)
 
     # 学習済みモデルがあれば、小節ごとの「区切り確率」から境界を決め直す（無ければ上のルールのまま）
-    from .boundary_model import bar_features, load_model, predict, pick_boundaries
+    from .boundary_model import bar_features, load_model, predict, pick_boundaries, confidence
+    from .extra_features import EXTRA_NAMES
     F = bar_features(foote4, foote8, estep, lpstep, ch, rep, (offset, offset8, offset16), n)
+    E = np.asarray(extra, float) if extra is not None and len(extra) == n else np.zeros((n, len(EXTRA_NAMES)))
+    F = np.hstack([F, E])
     model = load_model()
     prob = None
+    conf = {}
     if model is not None:
         prob = predict(model, F)
         bounds = pick_boundaries(prob, threshold=model.get("threshold", 0.75),
                                  max_sections=MAX_SECTIONS)
+        conf = {b: confidence(model, prob[b]) for b in bounds[1:-1]}
+        # 信頼度の下限（learn --min-confidence で決める。既定は 0 = 落とさない）
+        floor = model.get("min_confidence", 0.0)
+        if floor > 0:
+            bounds = [0] + [b for b in bounds[1:-1] if conf[b] >= floor] + [n]
         strength = {b: float(prob[b]) for b in bounds[1:-1]}
         n_removed = 0
 
@@ -296,6 +306,8 @@ def analyze_structure(bars_t, duration, frame_times, feats):
             "low_energy": round(float(low_rel[a:b].mean()), 3),
             "energy_slope": round(float(e_rel[a + half:b].mean() - e_rel[a:a + half].mean()), 3),
             "boundary_strength": round(float(strength.get(a, 1.0 if a == 0 else 0.0)), 3),
+            # 区切りの信頼度（学習モデル使用時: この境界が正解の±3秒以内にある見込み）
+            "boundary_confidence": round(float(conf.get(a, 1.0 if a == 0 else 0.0)), 3) if conf else None,
             "on_grid4": bool((a - offset) % 4 == 0),
             "on_grid8": bool((a - offset8) % 8 == 0),
             "on_grid16": bool((a - offset16) % 16 == 0),

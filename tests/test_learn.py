@@ -3,7 +3,7 @@ import json
 import numpy as np
 import soundfile as sf
 
-from backend.analysis.boundary_model import pick_boundaries, FEATURE_NAMES
+from backend.analysis.boundary_model import pick_boundaries, FEATURE_NAMES, CONTEXT
 from backend.analysis.pipeline import analyze_file
 from backend.learn import build_dataset, cross_validate, train_and_save
 from tests.synth import make_track, SR
@@ -26,11 +26,13 @@ def test_learn_on_synthetic(tmp_path):
         pairs.append((i, a, times))
     data = build_dataset(pairs)
     assert len(data) == 4 and all(d["X"].shape[1] == len(FEATURE_NAMES) for d in data)
-    cv = cross_validate(data, threshold=0.75)
+    cv = cross_validate(data)                      # しきい値は自動で選ぶ
     assert cv["model_f"] >= 0.7, cv
-    m, _ = train_and_save(data, 0.75, path=tmp_path / "model.json", cv=cv)
+    assert cv["threshold"] in cv["f_by_threshold"]
+    m, _ = train_and_save(data, path=tmp_path / "model.json", cv=cv)
     saved = json.loads((tmp_path / "model.json").read_text(encoding="utf-8"))
-    assert saved["feature_names"] == FEATURE_NAMES and len(saved["coef"]) == len(FEATURE_NAMES)
+    assert saved["feature_names"] == FEATURE_NAMES
+    assert len(saved["coef"]) == len(FEATURE_NAMES) * (2 * CONTEXT + 1)
 
 
 def test_estimate_offset(tmp_path):

@@ -57,7 +57,9 @@ def analyze_file(path, sr=SR, verbose=False):
         "chroma": chroma[:, :nf], "mfcc": mfcc[:, :nf], "rms_db": rms_db[:nf],
         "low_db": low_db[:nf], "perc_ratio": (rp / (rp + rh + 1e-9))[:nf],
     }
-    st = structure.analyze_structure(bars_t, duration, frame_times, feats)
+    from .extra_features import extra_bar_features
+    extra = extra_bar_features(y, sr, bars_t, duration)
+    st = structure.analyze_structure(bars_t, duration, frame_times, feats, extra=extra)
     log(f"セクション {len(st['sections'])} 個")
 
     return {
