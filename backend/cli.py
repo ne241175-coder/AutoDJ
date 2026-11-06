@@ -122,7 +122,7 @@ def cmd_sheet_fetch(a):
     from .fetch_songs import fetch_all
     rows = fetch_all(only=a.only or None, dry_run=a.dry_run)
     ok = sum(r["status"] in ("downloaded", "already", "selected") for r in rows)
-    print(f"--- {ok}/{len(rows)} 曲。選んだ動画は data/sheet/downloads.csv（違えば video_id を書き換えて再実行）")
+    print(f"--- {ok}/{len(rows)} 曲。選んだ動画は data/sheet/downloads.csv（違えば video_id を正しいIDに、status を manual にして再実行）")
 
 
 def cmd_plan(a):
