@@ -18,6 +18,8 @@ from ..config import DATA_DIR
 from .extra_features import EXTRA_NAMES
 
 MODEL_PATH = DATA_DIR / "model" / "boundary.json"
+# 同梱の学習済みモデル（シートの構成 44 曲で学習）。自分で learn すると MODEL_PATH が優先される
+DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "default_boundary_model.json"
 CONTEXT = 2   # 前後何小節の特徴量も並べるか
 BASE_NAMES = [
     "novelty_4bar",      # 音色・和声の変化（前後4小節の比較）
@@ -68,8 +70,8 @@ def bar_features(foote4, foote8, energy_step, lowperc_step, chroma, rep, offsets
     return F
 
 
-def load_model(path=MODEL_PATH):
-    p = Path(path)
+def load_model(path=None):
+    p = Path(path) if path else (MODEL_PATH if MODEL_PATH.exists() else DEFAULT_MODEL_PATH)
     if not p.exists():
         return None
     m = json.loads(p.read_text(encoding="utf-8"))
