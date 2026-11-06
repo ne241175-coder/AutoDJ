@@ -111,6 +111,22 @@ def split_long_sections(bounds, nov, offset8, strength, max_len=16, min_len=4):
     return out
 
 
+MAX_SECTIONS = 14   # シート実測: 1曲の区間は 6〜15（中央値12）。構成入力の1曲14行枠とも合わせる
+
+
+def limit_sections(bounds, strength, max_sections=MAX_SECTIONS):
+    """区間が多すぎる場合、境界の強さが弱いものから外して max_sections 以内にする。
+    戻り値: (bounds, 外した境界の数)"""
+    out = list(bounds)
+    removed = 0
+    while len(out) - 1 > max_sections:
+        inner = out[1:-1]
+        weakest = min(inner, key=lambda b: strength.get(b, 0.0))
+        out.remove(weakest)
+        removed += 1
+    return out, removed
+
+
 def repetition_score(C, min_lag=8, span=4):
     """各小節について「曲中の別の場所（min_lag 小節以上離れた所）に、同じ和声の流れが span 小節続けて
     現れるか」の強さ。サビは同じメロディ・コード進行を何度も繰り返すので高くなる。
@@ -245,6 +261,7 @@ def analyze_structure(bars_t, duration, frame_times, feats):
     offset16 = pick(offset8, 16)
     max_bars = max(8, 4 * int(round(32.0 / bar_len / 4)))   # 約32秒（4小節単位）
     bounds = split_long_sections(bounds, nov, offset8, strength, max_len=max_bars)
+    bounds, n_removed = limit_sections(bounds, strength)
     rep = repetition_score(ch)
 
     # 0〜1に正規化した小節エネルギー（曲内相対）
@@ -279,6 +296,8 @@ def analyze_structure(bars_t, duration, frame_times, feats):
         "sections": sections,
         "grid_offset": offset,
         "phrase_offsets": {"4": int(offset), "8": int(offset8), "16": int(offset16)},
+        # 区間が上限を超えたので弱い境界を外した、という通知（利用者に確認してもらう）
+        "notice": (f"区間が {MAX_SECTIONS} を超えたため、弱い境界を {n_removed} 個外しました" if n_removed else ""),
         "bar_novelty": [round(float(v), 3) for v in nov],
         "bar_energy": [round(float(v), 3) for v in e_rel],
         "bar_low_energy": [round(float(v), 3) for v in low_rel],

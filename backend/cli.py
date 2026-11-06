@@ -53,6 +53,8 @@ def cmd_analyze(a):
             r = analyze_track(tid, con=con, force=a.force, verbose=True)
             print(f"   → {r['tempo']['bpm']} BPM / {r['key']['name']} ({r['key']['camelot']}) / "
                   f"{len(r['structure']['sections'])} セクション / {r['elapsed_sec']}s")
+            if r["structure"].get("notice"):
+                print(f"   ⚠ {r['structure']['notice']}（show {tid} で確認してください）")
         except Exception as e:  # 1曲の失敗で全体を止めない
             print(f"   × 失敗: {e}")
 
