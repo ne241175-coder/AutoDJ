@@ -94,9 +94,14 @@ def key_score(cam_a, cam_b):
 
 # ---------- 候補 ----------
 def exit_points(song):
-    """出る位置の候補: サビの終わり（小節頭に吸着）"""
-    out = [(song.snap(s["end"]), "chorus") for s in song.sections if s["role"] == "chorus" and s["end"]]
-    if not out:  # サビが無い/検出できない → 音量の大きい区間の終わり
+    """出る位置の候補: 区間の終わり（小節頭に吸着）。サビ終わりが本命、その他の区間の終わりも候補にする。
+    落ちサビ・イントロ・最初の区間の終わりは出口にしない"""
+    out = []
+    for i, s in enumerate(song.sections):
+        if not s["end"] or i == 0 or s["role"] in ("chorus_drop", "intro"):
+            continue
+        out.append((song.snap(s["end"]), "chorus" if s["role"] == "chorus" else s["role"]))
+    if not out:
         out = [(song.snap(s["end"]), s["role"]) for s in song.sections if s["end"]]
     return out
 
@@ -114,7 +119,11 @@ def entry_points(song):
     return sorted(set(pts))
 
 
-TYPE_BONUS = {("chorus", "chorus"): 0.30, ("chorus", "start"): 0.20, ("chorus", "verse"): 0.10}
+TYPE_BONUS = {("chorus", "chorus"): 0.30, ("chorus", "start"): 0.20, ("chorus", "verse"): 0.10,
+              # サビ以外で出るのは基本的に不利（Aメロだけ流して終わる、などを避ける）
+              ("outro", "start"): 0.05, ("outro", "chorus"): 0.05}
+NON_CHORUS_EXIT_PENALTY = 0.15
+DEFAULT_CHORUS_GRACE = 15.0   # サビ終わりで出るときは、最低秒数をこれだけ短くしてよい
 
 
 @dataclass
@@ -125,6 +134,7 @@ class Link:
     kind: str
     reasons: list = field(default_factory=list)
     manual: bool = False
+    out_role: str = "chorus"
 
 
 def candidate_links(a: Song, b: Song, manual=None):
@@ -134,8 +144,9 @@ def candidate_links(a: Song, b: Song, manual=None):
     links = []
     for xo, ko in exit_points(a):
         for xi, ki in entry_points(b):
-            bonus = TYPE_BONUS.get((ko, ki), 0.0)
-            links.append(Link(xo, xi, base + bonus, f"{ROLE_JA.get(ko, ko)}終わり→{ROLE_JA.get(ki, ki)}頭", why))
+            bonus = TYPE_BONUS.get((ko, ki), 0.0) - (0 if ko == "chorus" else NON_CHORUS_EXIT_PENALTY)
+            links.append(Link(xo, xi, base + bonus, f"{ROLE_JA.get(ko, ko)}終わり→{ROLE_JA.get(ki, ki)}頭", why,
+                              out_role=ko))
     if manual:
         links.append(Link(a.snap(manual["out"]), b.snap(manual["in"]), base + 2.0, "シートのつなぎメモ",
                           why + ["手動指定"], manual=True))
@@ -143,14 +154,18 @@ def candidate_links(a: Song, b: Song, manual=None):
 
 
 # ---------- 計画 ----------
-def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None):
-    """songs: [Song...]（曲順固定）。manual_links: {(i, i+1): {"out":秒,"in":秒}}"""
+def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=DEFAULT_CHORUS_GRACE):
+    """songs: [Song...]（曲順固定）。manual_links: {(i, i+1): {"out":秒,"in":秒}}
+    1曲は最低 min_sec 秒流す。ただしサビ終わりで出る場合は chorus_grace 秒だけ早く出てよい"""
     manual_links = manual_links or {}
     n = len(songs)
     if n < 2:
         raise ValueError("2曲以上必要です")
     cands = [candidate_links(songs[i], songs[i + 1], manual_links.get((i, i + 1))) for i in range(n - 1)]
     warnings = []
+
+    def required(l):
+        return max(0.0, min_sec - chorus_grace) if l.out_role == "chorus" else min_sec
 
     def length_penalty(play):
         # 必要以上に長く流しすぎない（同点なら短い方）
@@ -161,7 +176,7 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None):
     back = [np.full(len(c), -1, dtype=int) for c in cands]
     for j, l in enumerate(cands[0]):
         play = l.out - 0.0
-        if play >= min_sec or l.manual:
+        if play >= required(l) or l.manual:
             best[0][j] = l.score - length_penalty(play)
     for i in range(1, n - 1):
         for j, l in enumerate(cands[i]):
@@ -169,14 +184,14 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None):
                 if not np.isfinite(best[i - 1][k]):
                     continue
                 play = l.out - p.inn
-                if play <= 0 or (play < min_sec and not l.manual):
+                if play <= 0 or (play < required(l) and not l.manual):
                     continue
                 s = best[i - 1][k] + l.score - length_penalty(play)
                 if s > best[i][j]:
                     best[i][j], back[i][j] = s, k
     if not np.isfinite(best[-1]).any():
         warnings.append(f"最低 {min_sec:.0f} 秒の条件を満たす組合せがありません。条件を外して計画しました")
-        return plan_chain(songs, min_sec=0.0, manual_links=manual_links) if min_sec > 0 else None
+        return plan_chain(songs, min_sec=0.0, manual_links=manual_links, chorus_grace=0.0) if min_sec > 0 else None
 
     # 復元
     j = int(np.argmax(best[-1]))
@@ -195,8 +210,9 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None):
             end = chosen[i].out
         else:
             end = last_end(s, start, min_sec)
-        if end - start < min_sec - 1e-6:
-            warnings.append(f"{s.title}: 再生 {end - start:.0f} 秒（最低 {min_sec:.0f} 秒に届かず）")
+        need = min_sec - (chorus_grace if (i < n - 1 and chosen[i].out_role == "chorus") else 0.0)
+        if end - start < need - 1e-6:
+            warnings.append(f"{s.title}: 再生 {end - start:.0f} 秒（最低 {need:.0f} 秒に届かず）")
         items.append({"track_id": s.track_id, "title": s.title, "file": s.file, "start": round(start, 3),
                       "end": round(end, 3), "bpm": s.bpm, "camelot": s.camelot,
                       "structure_source": s.structure_source,
@@ -211,7 +227,7 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None):
                             "manual": l.manual, "tempo_gap": round(gap, 3),
                             # テンポが近ければ1小節かけて混ぜる、遠ければ1拍で切り替える
                             "overlap_beats": 4 if gap <= 0.06 else 1})
-    return {"min_sec": min_sec, "items": items, "transitions": transitions, "warnings": warnings}
+    return {"min_sec": min_sec, "chorus_grace": chorus_grace, "items": items, "transitions": transitions, "warnings": warnings}
 
 
 def first_start(song, exit_t, min_sec):
@@ -253,7 +269,7 @@ def describe(plan):
     return "\n".join(lines)
 
 
-def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None):
+def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_grace=DEFAULT_CHORUS_GRACE):
     """keys: 曲名 or track_id のリスト（曲順）。シートのつなぎメモがあれば自動で使う"""
     con = con or connect()
     structure, lst = ({}, {"routes": []})
@@ -272,7 +288,7 @@ def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None):
                 manual[(i, i + 1)] = r["link_mid_leaf"]
             if r["root"] == a and r["middle"] == b and r.get("link_root_mid"):
                 manual[(i, i + 1)] = r["link_root_mid"]
-    return plan_chain(songs, min_sec=min_sec, manual_links=manual)
+    return plan_chain(songs, min_sec=min_sec, manual_links=manual, chorus_grace=chorus_grace)
 
 
 def save_plan(plan, path):
