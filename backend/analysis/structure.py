@@ -88,11 +88,9 @@ def detect_boundaries(nov, n_bars, min_len=4, grid=4):
     return [0] + bounds + [n_bars], offset, snapped
 
 
-def split_long_sections(bounds, nov, offset8, strength, max_len=16):
-    """フレーズの事前知識: ポップスのセクションは多くが8/16小節。
-    16小節を超える区間は、内部の8小節グリッド上で新規性が最大の点で分割する
-    （ただし、その点にある程度の変化があること）。"""
-    floor = np.median(nov) + 0.25 * nov.std()
+def split_long_sections(bounds, nov, offset8, strength, max_len=16, min_len=4):
+    """フレーズの事前知識: ポップスの区間は多くが 10〜32 秒（シート25曲の実測、中央値19秒）。
+    max_len 小節を超える区間は、内部の8小節グリッド（なければ4小節）上で新規性が最大の点で必ず分割する。"""
     out = list(bounds)
     changed = True
     while changed:
@@ -100,8 +98,9 @@ def split_long_sections(bounds, nov, offset8, strength, max_len=16):
         for a, b in zip(out[:-1], out[1:]):
             if b - a <= max_len:
                 continue
-            cands = [c for c in range(a + 8, b - 7) if (c - offset8) % 8 == 0]
-            cands = [c for c in cands if nov[c] >= floor]
+            cands = [c for c in range(a + min_len, b - min_len + 1) if (c - offset8) % 8 == 0]
+            if not cands:
+                cands = [c for c in range(a + min_len, b - min_len + 1) if (c - offset8) % 4 == 0]
             if not cands:
                 continue
             c = max(cands, key=lambda c: nov[c])
@@ -110,6 +109,43 @@ def split_long_sections(bounds, nov, offset8, strength, max_len=16):
             changed = True
             break
     return out
+
+
+MAX_SECTIONS = 14   # シート実測: 1曲の区間は 6〜15（中央値12）。構成入力の1曲14行枠とも合わせる
+
+
+def limit_sections(bounds, strength, max_sections=MAX_SECTIONS):
+    """区間が多すぎる場合、境界の強さが弱いものから外して max_sections 以内にする。
+    戻り値: (bounds, 外した境界の数)"""
+    out = list(bounds)
+    removed = 0
+    while len(out) - 1 > max_sections:
+        inner = out[1:-1]
+        weakest = min(inner, key=lambda b: strength.get(b, 0.0))
+        out.remove(weakest)
+        removed += 1
+    return out, removed
+
+
+def repetition_score(C, min_lag=8, span=4):
+    """各小節について「曲中の別の場所（min_lag 小節以上離れた所）に、同じ和声の流れが span 小節続けて
+    現れるか」の強さ。サビは同じメロディ・コード進行を何度も繰り返すので高くなる。
+    C: 小節ごとの正規化クロマ (12 x n)"""
+    n = C.shape[1]
+    S = C.T @ C
+    rep = np.zeros(n)
+    for i in range(n):
+        best = 0.0
+        for j in range(n):
+            if abs(i - j) < min_lag:
+                continue
+            k = min(span, n - i, n - j)
+            if k < 2:
+                continue
+            v = np.mean([S[i + t, j + t] for t in range(k)])
+            best = max(best, v)
+        rep[i] = best
+    return rep
 
 
 def _group_sections(seg_feats, thresh=0.3):
@@ -141,24 +177,42 @@ def assign_roles(sections):
     n = len(sections)
     e = np.array([s["energy"] for s in sections])
     low = np.array([s["low_energy"] for s in sections])
+    rep = np.array([s.get("repetition", 0.0) for s in sections])
     med = np.median(e)
+
+    def z(x):
+        return (x - x.mean()) / (x.std() + 1e-9)
+
+    # 区間ごとの「サビらしさ」= 繰り返し度と音量（シート25曲では サビ=最も繰り返され、音量も大きい）
+    score = 0.55 * z(rep) + 0.45 * z(e)
+    for s, sc in zip(sections, score):
+        s["chorus_score"] = round(float(sc), 3)
     groups = {}
-    for s in sections:
-        groups.setdefault(s["group"], []).append(s["energy"])
-    # サビ/ドロップ = 2回以上出現するグループのうち最も音量が大きいもの
-    rep = {g: np.mean(v) for g, v in groups.items() if len(v) >= 2}
-    chorus_group = max(rep, key=rep.get) if rep else max(groups, key=lambda g: np.mean(groups[g]))
+    for i, s in enumerate(sections):
+        groups.setdefault(s["group"], []).append(i)
+
+    def group_value(idx):
+        v = float(np.mean(score[idx]))
+        if 2 <= len(idx) <= 4:      # サビは 2〜4 回（シートでは3回が最多）
+            v += 0.3
+        if idx and min(idx) == 0:   # 曲頭から始まるグループはイントロの可能性が高い
+            v -= 0.2
+        return v
+
+    chorus_group = max(groups, key=lambda g: group_value(groups[g]))
+    gmean = float(np.mean(score[groups[chorus_group]]))
 
     for i, s in enumerate(sections):
         role = "verse"
-        if s["group"] == chorus_group and s["energy"] >= med:
+        if (s["group"] == chorus_group and s["energy"] >= med) or \
+                (score[i] >= gmean and s["energy"] >= med and s["bars"] >= 6):
             role = "chorus"
         if 0 < i < n - 1:
             neighbors = max(e[i - 1], e[i + 1])
             if e[i] < neighbors - 0.12 and low[i] < np.median(low):
                 role = "break"
             elif (e[i + 1] > e[i] + 0.08 and s["energy_slope"] > 0.05
-                  and sections[i + 1]["group"] == chorus_group):
+                  and sections[i + 1]["group"] == chorus_group and role != "chorus"):
                 role = "build"
         if i == 0 and (e[0] < med or low[0] < np.median(low)):
             role = "intro"
@@ -168,14 +222,15 @@ def assign_roles(sections):
     return sections
 
 
-def analyze_structure(bars_t, duration, frame_times, feats):
+def analyze_structure(bars_t, duration, frame_times, feats, extra=None):
     """
     bars_t: 小節頭の時刻配列
     feats: dict(chroma(12xF), mfcc(13xF), rms_db(F), low_db(F), perc_ratio(F))
+    extra: 小節ごとの追加特徴量（extra_features.extra_bar_features、無ければ0）
     """
     starts = np.asarray(bars_t, float)
     if len(starts) < 8:
-        return {"sections": [], "grid_offset": 0, "bar_novelty": []}
+        return {"sections": [], "grid_offset": 0, "bar_novelty": [], "bar_features": [], "rule_bounds": []}
     bar_len = np.median(np.diff(starts))
     ends = np.append(starts[1:], min(duration, starts[-1] + bar_len))
 
@@ -192,9 +247,9 @@ def analyze_structure(bars_t, duration, frame_times, feats):
     Xe = (X + np.hstack([X[:, 1:], X[:, -1:]])) / 2
     Xe = Xe / (np.linalg.norm(Xe, axis=0, keepdims=True) + 1e-9)
     S = Xe.T @ Xe
-    nov = (0.5 * _norm01(foote_novelty(S, k=4))
-           + 0.3 * _norm01(step_change(rms))
-           + 0.2 * _norm01(step_change(low) + step_change(perc * 20)))
+    foote4, foote8 = foote_novelty(S, k=4), foote_novelty(S, k=8)
+    estep, lpstep = step_change(rms), step_change(low) + step_change(perc * 20)
+    nov = (0.5 * _norm01(foote4) + 0.3 * _norm01(estep) + 0.2 * _norm01(lpstep))
 
     bounds, offset, strength = detect_boundaries(nov, n)
     # 8/16小節フレーズの位相: 4小節グリッドと矛盾しない位相のうち、境界の強さの合計が大きい方
@@ -205,7 +260,32 @@ def analyze_structure(bars_t, duration, frame_times, feats):
         return cands[int(np.argmax(score))] % period
     offset8 = pick(offset, 8)
     offset16 = pick(offset8, 16)
-    bounds = split_long_sections(bounds, nov, offset8, strength)
+    max_bars = max(8, 4 * int(round(32.0 / bar_len / 4)))   # 約32秒（4小節単位）
+    bounds = split_long_sections(bounds, nov, offset8, strength, max_len=max_bars)
+    bounds, n_removed = limit_sections(bounds, strength)
+    rule_bounds = list(bounds)
+    rep = repetition_score(ch)
+
+    # 学習済みモデルがあれば、小節ごとの「区切り確率」から境界を決め直す（無ければ上のルールのまま）
+    from .boundary_model import bar_features, load_model, predict, pick_boundaries, confidence
+    from .extra_features import EXTRA_NAMES
+    F = bar_features(foote4, foote8, estep, lpstep, ch, rep, (offset, offset8, offset16), n)
+    E = np.asarray(extra, float) if extra is not None and len(extra) == n else np.zeros((n, len(EXTRA_NAMES)))
+    F = np.hstack([F, E])
+    model = load_model()
+    prob = None
+    conf = {}
+    if model is not None:
+        prob = predict(model, F)
+        bounds = pick_boundaries(prob, threshold=model.get("threshold", 0.75),
+                                 max_sections=MAX_SECTIONS)
+        conf = {b: confidence(model, prob[b]) for b in bounds[1:-1]}
+        # 信頼度の下限（learn --min-confidence で決める。既定は 0 = 落とさない）
+        floor = model.get("min_confidence", 0.0)
+        if floor > 0:
+            bounds = [0] + [b for b in bounds[1:-1] if conf[b] >= floor] + [n]
+        strength = {b: float(prob[b]) for b in bounds[1:-1]}
+        n_removed = 0
 
     # 0〜1に正規化した小節エネルギー（曲内相対）
     def rel(x):
@@ -226,9 +306,12 @@ def analyze_structure(bars_t, duration, frame_times, feats):
             "low_energy": round(float(low_rel[a:b].mean()), 3),
             "energy_slope": round(float(e_rel[a + half:b].mean() - e_rel[a:a + half].mean()), 3),
             "boundary_strength": round(float(strength.get(a, 1.0 if a == 0 else 0.0)), 3),
+            # 区切りの信頼度（学習モデル使用時: この境界が正解の±3秒以内にある見込み）
+            "boundary_confidence": round(float(conf.get(a, 1.0 if a == 0 else 0.0)), 3) if conf else None,
             "on_grid4": bool((a - offset) % 4 == 0),
             "on_grid8": bool((a - offset8) % 8 == 0),
             "on_grid16": bool((a - offset16) % 16 == 0),
+            "repetition": round(float(rep[a:b].mean()), 3),
         })
     for s, g in zip(sections, _group_sections(seg_feats)):
         s["group"] = g
@@ -238,6 +321,12 @@ def analyze_structure(bars_t, duration, frame_times, feats):
         "sections": sections,
         "grid_offset": offset,
         "phrase_offsets": {"4": int(offset), "8": int(offset8), "16": int(offset16)},
+        # 区間が上限を超えたので弱い境界を外した、という通知（利用者に確認してもらう）
+        "notice": (f"区間が {MAX_SECTIONS} を超えたため、弱い境界を {n_removed} 個外しました" if n_removed else ""),
+        "boundary_source": "model" if prob is not None else "rule",
+        "rule_bounds": [int(b) for b in rule_bounds],
+        "bar_boundary_prob": [round(float(v), 3) for v in prob] if prob is not None else [],
+        "bar_features": [[round(float(v), 4) for v in row] for row in F],
         "bar_novelty": [round(float(v), 3) for v in nov],
         "bar_energy": [round(float(v), 3) for v in e_rel],
         "bar_low_energy": [round(float(v), 3) for v in low_rel],

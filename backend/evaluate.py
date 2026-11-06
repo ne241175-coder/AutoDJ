@@ -115,18 +115,21 @@ def evaluate_sheet(con=None):
         if a is None:
             rows.append(f"{name}: 未取り込み/未解析")
             continue
-        ref = [s["start"] for s in truth["sections"]][1:]   # 0秒の頭は自明なので除く
+        from .align import aligned_sections
+        aligned, off = aligned_sections(truth, a)            # 計測した動画と音源のズレを補正
+        ref = [s["start"] for s in aligned][1:]   # 0秒の頭は自明なので除く
         auto = a["structure"]["sections"]
         est = [s["start"] for s in auto][1:]
         p, r, f = boundary_prf(est, ref, tol=3.0)
         fs.append(f)
-        ref_ch = [s["start"] for s in truth["sections"] if s["role"] == "chorus"]
+        ref_ch = [s["start"] for s in aligned if s["role"] == "chorus"]
         est_ch = np.array([s["start"] for s in auto if s["role"] == "chorus"])
         hit = sum(1 for t in ref_ch if len(est_ch) and np.min(np.abs(est_ch - t)) <= 3.0)
         rate = hit / len(ref_ch) if ref_ch else float("nan")
         if ref_ch:
             cr.append(rate)
-        rows.append(f"{name}: 区間数 自動{len(auto)}/正解{len(truth['sections'])}  "
+        shift = f"（ズレ補正 {off:+.1f}秒）" if off else ""
+        rows.append(f"{name}{shift}: 区間数 自動{len(auto)}/正解{len(truth['sections'])}  "
                     f"境界 P={p:.2f} R={r:.2f} F={f:.2f}  サビ検出 {hit}/{len(ref_ch)}")
     summary = []
     if fs:
