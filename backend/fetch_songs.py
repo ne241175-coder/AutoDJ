@@ -84,7 +84,7 @@ def _manual_overrides():
         return {r["song"]: r for r in csv.DictReader(f)}
 
 
-def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None, log=print):
+def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None, log=print, reselect=False):
     import yt_dlp
     structure, lst = load_cached()
     con = con or connect()
@@ -103,7 +103,8 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None,
             # 手で書いた video_id（status=manual や not_found の行）と、取り込み済みの動画だけを尊重する。
             # dry-run で選んだだけの行（selected）は毎回選び直す
             vid = (ov.get("video_id") or "").strip()
-            if ov.get("status") not in ("manual", "not_found", "downloaded", "already"):
+            keep = ("manual", "not_found") if reselect else ("manual", "not_found", "downloaded", "already")
+            if ov.get("status") not in keep:
                 vid = ""
             pick = None
             if vid:
