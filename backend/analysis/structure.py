@@ -229,7 +229,7 @@ def analyze_structure(bars_t, duration, frame_times, feats):
     """
     starts = np.asarray(bars_t, float)
     if len(starts) < 8:
-        return {"sections": [], "grid_offset": 0, "bar_novelty": []}
+        return {"sections": [], "grid_offset": 0, "bar_novelty": [], "bar_features": [], "rule_bounds": []}
     bar_len = np.median(np.diff(starts))
     ends = np.append(starts[1:], min(duration, starts[-1] + bar_len))
 
@@ -246,9 +246,9 @@ def analyze_structure(bars_t, duration, frame_times, feats):
     Xe = (X + np.hstack([X[:, 1:], X[:, -1:]])) / 2
     Xe = Xe / (np.linalg.norm(Xe, axis=0, keepdims=True) + 1e-9)
     S = Xe.T @ Xe
-    nov = (0.5 * _norm01(foote_novelty(S, k=4))
-           + 0.3 * _norm01(step_change(rms))
-           + 0.2 * _norm01(step_change(low) + step_change(perc * 20)))
+    foote4, foote8 = foote_novelty(S, k=4), foote_novelty(S, k=8)
+    estep, lpstep = step_change(rms), step_change(low) + step_change(perc * 20)
+    nov = (0.5 * _norm01(foote4) + 0.3 * _norm01(estep) + 0.2 * _norm01(lpstep))
 
     bounds, offset, strength = detect_boundaries(nov, n)
     # 8/16小節フレーズの位相: 4小節グリッドと矛盾しない位相のうち、境界の強さの合計が大きい方
@@ -262,7 +262,20 @@ def analyze_structure(bars_t, duration, frame_times, feats):
     max_bars = max(8, 4 * int(round(32.0 / bar_len / 4)))   # 約32秒（4小節単位）
     bounds = split_long_sections(bounds, nov, offset8, strength, max_len=max_bars)
     bounds, n_removed = limit_sections(bounds, strength)
+    rule_bounds = list(bounds)
     rep = repetition_score(ch)
+
+    # 学習済みモデルがあれば、小節ごとの「区切り確率」から境界を決め直す（無ければ上のルールのまま）
+    from .boundary_model import bar_features, load_model, predict, pick_boundaries
+    F = bar_features(foote4, foote8, estep, lpstep, ch, rep, (offset, offset8, offset16), n)
+    model = load_model()
+    prob = None
+    if model is not None:
+        prob = predict(model, F)
+        bounds = pick_boundaries(prob, threshold=model.get("threshold", 0.75),
+                                 max_sections=MAX_SECTIONS)
+        strength = {b: float(prob[b]) for b in bounds[1:-1]}
+        n_removed = 0
 
     # 0〜1に正規化した小節エネルギー（曲内相対）
     def rel(x):
@@ -298,6 +311,10 @@ def analyze_structure(bars_t, duration, frame_times, feats):
         "phrase_offsets": {"4": int(offset), "8": int(offset8), "16": int(offset16)},
         # 区間が上限を超えたので弱い境界を外した、という通知（利用者に確認してもらう）
         "notice": (f"区間が {MAX_SECTIONS} を超えたため、弱い境界を {n_removed} 個外しました" if n_removed else ""),
+        "boundary_source": "model" if prob is not None else "rule",
+        "rule_bounds": [int(b) for b in rule_bounds],
+        "bar_boundary_prob": [round(float(v), 3) for v in prob] if prob is not None else [],
+        "bar_features": [[round(float(v), 4) for v in row] for row in F],
         "bar_novelty": [round(float(v), 3) for v in nov],
         "bar_energy": [round(float(v), 3) for v in e_rel],
         "bar_low_energy": [round(float(v), 3) for v in low_rel],
