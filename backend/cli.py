@@ -120,9 +120,9 @@ def cmd_sheet_sync(a):
 
 def cmd_sheet_fetch(a):
     from .fetch_songs import fetch_all
-    rows = fetch_all(only=a.only or None, dry_run=a.dry_run)
+    rows = fetch_all(only=a.only or None, dry_run=a.dry_run, reselect=a.reselect)
     ok = sum(r["status"] in ("downloaded", "already", "selected") for r in rows)
-    print(f"--- {ok}/{len(rows)} 曲。選んだ動画は data/sheet/downloads.csv（違えば video_id を書き換えて再実行）")
+    print(f"--- {ok}/{len(rows)} 曲。選んだ動画は data/sheet/downloads.csv（違えば video_id を正しいIDに、status を manual にして再実行）")
 
 
 def cmd_plan(a):
@@ -201,6 +201,7 @@ def main(argv=None):
     s = sub.add_parser("sheet-fetch", help="シートの曲を YouTube から一括取り込み（長さが合う動画を自動選択）")
     s.add_argument("--only", nargs="*", help="この曲名だけ")
     s.add_argument("--dry-run", action="store_true", help="選ぶ動画を表示するだけ")
+    s.add_argument("--reselect", action="store_true", help="取り込み済みの曲も選び直す（status=manual の行は維持）")
     s.set_defaults(fn=cmd_sheet_fetch)
 
     s = sub.add_parser("plan", help="曲順からつなぎ位置と再生区間を決める（ファイルは切らない）")

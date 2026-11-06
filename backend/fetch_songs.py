@@ -2,7 +2,8 @@
 
 構成入力の秒数は「ある特定の動画」で計ったものなので、別の動画（MVのドラマ部分付き、ライブ版など）を
 取ると時刻がずれる。そこで検索結果の中から「シートの終了時刻と長さが最も近い動画」を選ぶ。
-選んだ結果は data/sheet/downloads.csv に残すので、違っていたら video_id を書き換えて再実行できる。
+選んだ結果は data/sheet/downloads.csv に残す。違っていたら、その行の video_id を正しい動画のIDに、
+status を manual に書き換えて再実行する（YouTube の URL の v= の後ろがID）。
 """
 import csv
 import re
@@ -13,10 +14,17 @@ from .db import connect, get_or_create_set
 from .ingest import _ydl_opts, _register
 from .sheet import SHEET_DIR, load_cached
 
-BAD_WORDS = re.compile(r"(live|ライブ|cover|カバー|歌ってみた|弾いてみた|叩いてみた|karaoke|カラオケ|"
-                       r"instrumental|off vocal|short|切り抜き|remix|nightcore|slowed|sped up|piano)", re.I)
-GOOD_WORDS = re.compile(r"(official|music video|mv|audio|公式)", re.I)
+BAD_WORDS = re.compile(r"(live|ライブ|cover|カバー|歌ってみた|弾いてみた|叩いてみた|踊ってみた|karaoke|カラオケ|"
+                       r"instrumental|off vocal|short|切り抜き|remix|nightcore|slowed|sped up|piano|replica|"
+                       r"dance practice|dance ver|mirrored|staff ver|movie edit|tv size|tv ver|8d|reaction)", re.I)
+GOOD_WORDS = re.compile(r"(official|music video|公式|provided to youtube)", re.I)
 TOLERANCE = 4.0  # 秒: シートの長さとの許容差
+
+
+def is_topic(entry):
+    """YouTube の自動生成チャンネル（「アーティスト - Topic」）= アルバム音源そのもの"""
+    ch = (entry.get("channel") or entry.get("uploader") or "")
+    return ch.endswith(" - Topic") or ch.endswith("- Topic")
 
 
 def score_candidate(entry, target_sec):
@@ -36,18 +44,36 @@ def score_candidate(entry, target_sec):
             return None
     if BAD_WORDS.search(title):
         s += 50
-    if GOOD_WORDS.search(title):
+    if is_topic(entry):
+        s -= 5          # シートの秒数はアルバム版で計っていることが多いので最優先
+    elif GOOD_WORDS.search(title):
         s -= 2
     return s
 
 
 def choose(entries, target_sec):
-    scored = [(score_candidate(e, target_sec), e) for e in entries if e]
-    scored = [(s, e) for s, e in scored if s is not None]
+    seen, scored = set(), []
+    for e in entries:
+        if not e or e.get("id") in seen:
+            continue
+        seen.add(e.get("id"))
+        sc = score_candidate(e, target_sec)
+        if sc is not None:
+            scored.append((sc, e))
     if not scored:
         return None
     scored.sort(key=lambda x: x[0])
     return scored[0][1]
+
+
+def clean_query(q):
+    """'ハレンチ(ちゃんみな) ちゃんみな' → 'ハレンチ ちゃんみな'、'/' は空白に"""
+    q = re.sub(r"[（(][^）)]*[）)]", " ", q).replace("/", " ")
+    words, out = q.split(), []
+    for w in words:
+        if w not in out:
+            out.append(w)
+    return " ".join(out)
 
 
 def _manual_overrides():
@@ -58,7 +84,7 @@ def _manual_overrides():
         return {r["song"]: r for r in csv.DictReader(f)}
 
 
-def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None, log=print):
+def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None, log=print, reselect=False):
     import yt_dlp
     structure, lst = load_cached()
     con = con or connect()
@@ -74,20 +100,33 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None,
         for name in names:
             target = structure.get(name, {}).get("end")
             ov = overrides.get(name, {})
+            # 手で書いた video_id（status=manual や not_found の行）と、取り込み済みの動画だけを尊重する。
+            # dry-run で選んだだけの行（selected）は毎回選び直す
             vid = (ov.get("video_id") or "").strip()
+            keep = ("manual", "not_found") if reselect else ("manual", "not_found", "downloaded", "already")
+            if ov.get("status") not in keep:
+                vid = ""
             pick = None
             if vid:
                 pick = {"id": vid, "title": ov.get("title", ""), "duration": float(ov.get("duration") or 0)}
             else:
-                res = ys.extract_info(f"ytsearch{n_results}:{lst['songs'][name]}", download=False)
-                pick = choose(res.get("entries") or [], target)
+                q = clean_query(lst["songs"][name])
+                entries = []
+                # 通常検索 ＋ アルバム音源（Topic チャンネル）狙いの検索
+                for query in (q, f"{q} provided to YouTube"):
+                    res = ys.extract_info(f"ytsearch{n_results}:{query}", download=False)
+                    entries += res.get("entries") or []
+                pick = choose(entries, target)
             if not pick:
-                log(f"× {name}: 長さ{target}s に合う動画が見つかりません（downloads.csv に video_id を手で書いて再実行）")
+                want = f"長さ {target:.0f}秒 ±{TOLERANCE:.0f}" if target else "条件"
+                log(f"× {name}: {want} に合う動画が見つかりません（downloads.csv に video_id を手で書いて再実行）")
                 rows.append({"song": name, "video_id": "", "title": "", "duration": "",
                              "sheet_end": target or "", "diff": "", "status": "not_found"})
                 continue
             diff = abs(pick["duration"] - target) if (target and pick.get("duration")) else ""
-            log(f"○ {name}: {pick['title']} ({pick.get('duration')}s, シート {target}s)")
+            sheet_len = f"シート {target:.0f}秒" if target else "シートに長さなし"
+            topic = " [Topic=アルバム音源]" if is_topic(pick) else ""
+            log(f"○ {name}: {pick['title']}{topic} ({pick.get('duration')}秒, {sheet_len})")
             status = "selected"
             existing = con.execute("SELECT file_path FROM tracks WHERE source_id=?", (f"yt:{pick['id']}",)).fetchone()
             if existing and Path(existing["file_path"]).exists():
