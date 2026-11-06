@@ -92,3 +92,17 @@ def test_video_tab_and_strict_title():
     E = [{"id": "k", "title": "Kagerou", "duration": 248, "channel": "ONE OK ROCK"}]
     assert choose(E, 248, "ONE OK ROCK", "完全感覚Dreamer") is None
     assert choose([{"id": "m", "title": "【432Hz】ポリリズム", "duration": 252, "channel": "x"}], 252, "Perfume", "ポリリズム") is None
+
+
+def test_chorus_grace_allows_earlier_exit_only_at_chorus(songs):
+    ss = [s for s, _ in songs]
+    strict = plan_chain(ss, min_sec=70, chorus_grace=0)
+    loose = plan_chain(ss, min_sec=70, chorus_grace=20)
+    mid_s = strict["items"][1]["end"] - strict["items"][1]["start"]
+    mid_l = loose["items"][1]["end"] - loose["items"][1]["start"]
+    assert mid_s >= 70 - 1e-6
+    assert mid_l <= mid_s
+    # 猶予を使って早めに出る場合は、サビ終わりからだけ
+    for t, it in zip(loose["transitions"], loose["items"]):
+        if it["end"] - it["start"] < 70 - 1e-6:
+            assert t["kind"].startswith("サビ終わり"), t
