@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoDJ</title>
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e7e9ee; --muted: #8a92a3;
+  --accent: #ff7a59; --accent2: #5ac8fa; --warn: #f5b041;
+  --c-chorus: #ff7a59; --c-drop: #c9785f; --c-verse: #4f7cff; --c-pre: #2fb5a4; --c-bridge: #a066e0;
+  --c-edge: #4a5160; --c-inter: #353b47; --c-other: #5b6372;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; font-size: 14px; }
+button { font: inherit; color: var(--text); background: #232835; border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: #3a4152; }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
+input { font: inherit; color: var(--text); background: #0f1218; border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+small { color: var(--muted); font-weight: 400; }
+.app { min-height: 100vh; padding-bottom: 84px; }
+header { display: flex; align-items: baseline; gap: 14px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+header h1 { margin: 0; font-size: 20px; letter-spacing: .04em; }
+header .sub { color: var(--muted); font-size: 12px; }
+header .msg { margin-left: auto; color: var(--warn); }
+main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+.panel h2 { margin: 0 0 10px; font-size: 14px; }
+.clickable { cursor: pointer; }
+.search { width: 100%; margin-bottom: 8px; }
+.tracks { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow: auto; }
+.tracks li { display: flex; align-items: center; gap: 8px; padding: 7px 4px; border-bottom: 1px solid var(--line); }
+.tracks li.off .ttitle { color: var(--muted); }
+.tmain { flex: 1; min-width: 0; }
+.ttitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tmeta { display: flex; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.cam { color: var(--accent2); }
+.badge { border-radius: 4px; padding: 0 5px; font-size: 11px; }
+.badge.sheet { background: #233a2f; color: #7be0a4; }
+.badge.warn, .warn { color: var(--warn); }
+.add { width: 30px; height: 30px; padding: 0; font-size: 18px; }
+.routes ul { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow: auto; }
+.routes li { display: flex; flex-direction: column; gap: 4px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.routes li button { align-self: flex-start; }
+.routes li.off span { color: var(--muted); }
+.memo { color: var(--muted); }
+.set ol { list-style: none; margin: 0 0 10px; padding: 0; }
+.set li { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.num { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #262c38; font-size: 12px; flex: none; }
+.stitle { flex: 1; }
+.smeta { color: var(--muted); font-size: 12px; }
+.ctrl { display: flex; gap: 4px; }
+.ctrl button { padding: 2px 7px; }
+.hint { color: var(--muted); }
+.planrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.planrow input { width: 72px; }
+.item { padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: #12151b; }
+.item.now { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.ihead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.ititle { font-weight: 600; font-size: 15px; }
+.irange { color: var(--accent); }
+.imeta { color: var(--muted); font-size: 12px; margin-left: auto; }
+.flow { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.secbar { position: relative; height: 18px; border-radius: 4px; overflow: hidden; background: #0b0d11; }
+.secbar.loading { opacity: .4; }
+.sec { position: absolute; top: 0; bottom: 0; border-right: 1px solid #0b0d11; overflow: hidden; }
+.sec span { font-size: 10px; padding-left: 3px; color: rgba(255,255,255,.85); white-space: nowrap; line-height: 18px; }
+.dim { position: absolute; top: 0; bottom: 0; background: rgba(8,9,12,.72); }
+.mark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #fff; }
+.trans { display: flex; gap: 10px; padding: 6px 0 6px 18px; }
+.tline { width: 2px; background: linear-gradient(var(--accent), var(--accent2)); border-radius: 1px; }
+.tbody { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; }
+.tkind { font-weight: 600; }
+.treason { color: var(--muted); font-size: 12px; }
+.warnline { color: var(--warn); margin: 0 0 8px; }
+.player { position: fixed; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 14px;
+  padding: 12px 20px; background: #12151b; border-top: 1px solid var(--line); }
+.player .big { width: 46px; height: 46px; border-radius: 50%; font-size: 18px; background: var(--accent); color: #111; border: none; }
+.pinfo { flex: 1; min-width: 0; }
+.pnow { margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ptrack { position: relative; height: 8px; border-radius: 4px; background: #232835; cursor: pointer; }
+.pfill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: linear-gradient(90deg, var(--accent2), var(--accent)); }
+.pmark { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; opacity: .7; }
+.ptime { font-variant-numeric: tabular-nums; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/static/vendor/react.production.min.js"></script>
+<script src="/static/vendor/react-dom.production.min.js"></script>
+<script src="/static/vendor/htm.umd.js"></script>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
