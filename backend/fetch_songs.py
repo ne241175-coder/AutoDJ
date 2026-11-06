@@ -16,9 +16,12 @@ from .sheet import SHEET_DIR, load_cached
 
 BAD_WORDS = re.compile(r"(live|ライブ|cover|カバー|歌ってみた|弾いてみた|叩いてみた|踊ってみた|karaoke|カラオケ|"
                        r"instrumental|off vocal|short|切り抜き|remix|nightcore|slowed|sped up|piano|replica|"
-                       r"dance practice|dance ver|mirrored|staff ver|movie edit|tv size|tv ver|8d|reaction)", re.I)
+                       r"dance practice|dance ver|mirrored|staff ver|movie edit|tv size|tv ver|8d|reaction|"
+                       r"原曲歌手|[+-]\s?\d\s?key|キー|ガイドメロディ|オルゴール|music box|from [a-z0-9]|オーケストラ|acoustic|"
+                       r"令和ver|re-?record|self cover|セルフカバー)", re.I)
 GOOD_WORDS = re.compile(r"(official|music video|公式|provided to youtube)", re.I)
-TOLERANCE = 4.0  # 秒: シートの長さとの許容差
+TOLERANCE = 4.0      # 秒: シートの長さとの許容差
+MIN_DUR_NO_TARGET = 150  # シートに長さがない曲は、短すぎる同名曲を避けるため 2:30 以上に限る
 
 
 def is_topic(entry):
@@ -27,11 +30,37 @@ def is_topic(entry):
     return ch.endswith(" - Topic") or ch.endswith("- Topic")
 
 
-def score_candidate(entry, target_sec):
-    """小さいほど良い。長さが合わないものは除外（None）"""
+def artist_match(entry, artist):
+    """タイトルかチャンネル名にアーティスト名が含まれるか（空白・大文字小文字は無視）"""
+    if not artist:
+        return False
+    hay = ((entry.get("title") or "") + " " + (entry.get("channel") or entry.get("uploader") or "")).lower().replace(" ", "")
+    return artist.lower().replace(" ", "") in hay
+
+
+def _norm(x):
+    return re.sub(r"[\s　・!！?？「」『』【】\[\]()（）/／\-–—~〜'\".,、。]", "", x or "").lower()
+
+
+def name_match(entry, song):
+    """動画タイトルに曲名（'フィギュア/SixTONES' なら 'フィギュア'）が含まれるか"""
+    key = _norm(re.split(r"[/／]", song)[0])
+    return bool(key) and key in _norm(entry.get("title"))
+
+
+def score_candidate(entry, target_sec, artist="", song=""):
+    """小さいほど良い。候補にしないものは None。
+    - 除外語（カバー・カラオケ・ライブ等）を含むものは候補にしない
+    - シートに長さがあれば ±4秒以内のものだけ（同じ音源である可能性が高い）
+    - 長さがなければ、同名の別曲を避けるためアーティスト名の一致を重視する"""
     dur = entry.get("duration")
     title = entry.get("title") or ""
-    if not dur:
+    if not dur or BAD_WORDS.search(title):
+        return None
+    match = artist_match(entry, artist)
+    # 長さが偶然一致した別の曲（例: 完全感覚Dreamer → Kagerou）を避けるため、
+    # 曲名かアーティスト名のどちらかがタイトル／チャンネル名に入っていることを必須にする
+    if song and not (match or name_match(entry, song)):
         return None
     s = 0.0
     if target_sec:
@@ -39,25 +68,35 @@ def score_candidate(entry, target_sec):
         if diff > TOLERANCE:
             return None
         s += diff
+        if is_topic(entry):
+            s -= 5          # 長さが一致した Topic = アルバム音源そのもの
     else:
-        if not 100 <= dur <= 480:
+        if not MIN_DUR_NO_TARGET <= dur <= 480:
             return None
-    if BAD_WORDS.search(title):
-        s += 50
-    if is_topic(entry):
-        s -= 5          # シートの秒数はアルバム版で計っていることが多いので最優先
-    elif GOOD_WORDS.search(title):
+        if is_topic(entry):
+            s += -5 if match else 3   # 同名の別アーティストの Topic を避ける
+    if match:
+        s -= 3
+    # 曲名がタイトルに入っていれば大きく加点、入っていなければ減点。
+    # 同じアーティストの別の曲で長さが偶然一致したもの（完全感覚Dreamer → Kagerou）を避ける。
+    # Topic はローマ字・英語表記（Sugar Song and Bitter Step など）が多いので減点を小さく
+    if song:
+        if name_match(entry, song):
+            s -= 6
+        else:
+            s += 2 if is_topic(entry) else 4
+    if GOOD_WORDS.search(title):
         s -= 2
     return s
 
 
-def choose(entries, target_sec):
+def choose(entries, target_sec, artist="", song=""):
     seen, scored = set(), []
     for e in entries:
         if not e or e.get("id") in seen:
             continue
         seen.add(e.get("id"))
-        sc = score_candidate(e, target_sec)
+        sc = score_candidate(e, target_sec, artist, song)
         if sc is not None:
             scored.append((sc, e))
     if not scored:
@@ -84,7 +123,7 @@ def _manual_overrides():
         return {r["song"]: r for r in csv.DictReader(f)}
 
 
-def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None, log=print, reselect=False):
+def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None, log=print, reselect=False):
     import yt_dlp
     structure, lst = load_cached()
     con = con or connect()
@@ -108,15 +147,24 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None,
                 vid = ""
             pick = None
             if vid:
-                pick = {"id": vid, "title": ov.get("title", ""), "duration": float(ov.get("duration") or 0)}
+                # 手動指定: タイトルと長さを取りに行って表示する（取れなくてもそのまま使う）
+                try:
+                    info = ys.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
+                    pick = {"id": vid, "title": info.get("title", ""), "duration": float(info.get("duration") or 0),
+                            "channel": info.get("channel", "")}
+                except Exception:
+                    pick = {"id": vid, "title": "(手動指定)", "duration": 0.0}
+                pick["title"] = f"{pick['title']} [手動指定]"
             else:
                 q = clean_query(lst["songs"][name])
+                title_words = clean_query(name).split()
+                artist = " ".join(w for w in q.split() if w not in title_words)
                 entries = []
                 # 通常検索 ＋ アルバム音源（Topic チャンネル）狙いの検索
                 for query in (q, f"{q} provided to YouTube"):
                     res = ys.extract_info(f"ytsearch{n_results}:{query}", download=False)
                     entries += res.get("entries") or []
-                pick = choose(entries, target)
+                pick = choose(entries, target, artist, name)
             if not pick:
                 want = f"長さ {target:.0f}秒 ±{TOLERANCE:.0f}" if target else "条件"
                 log(f"× {name}: {want} に合う動画が見つかりません（downloads.csv に video_id を手で書いて再実行）")
@@ -124,9 +172,13 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None,
                              "sheet_end": target or "", "diff": "", "status": "not_found"})
                 continue
             diff = abs(pick["duration"] - target) if (target and pick.get("duration")) else ""
+            status_manual = bool(vid)
             sheet_len = f"シート {target:.0f}秒" if target else "シートに長さなし"
             topic = " [Topic=アルバム音源]" if is_topic(pick) else ""
-            log(f"○ {name}: {pick['title']}{topic} ({pick.get('duration')}秒, {sheet_len})")
+            if vid:
+                log(f"○ {name}: 手動指定の動画 https://youtu.be/{vid}（長さはダウンロード時に確認）")
+            else:
+                log(f"○ {name}: {pick['title']}{topic} ({pick.get('duration')}秒, {sheet_len})")
             status = "selected"
             existing = con.execute("SELECT file_path FROM tracks WHERE source_id=?", (f"yt:{pick['id']}",)).fetchone()
             if existing and Path(existing["file_path"]).exists():
@@ -150,3 +202,39 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=8, con=None,
         w.writeheader()
         w.writerows(rows)
     return rows
+
+
+def video_id_from(url_or_id):
+    """https://youtu.be/XXXX / https://www.youtube.com/watch?v=XXXX / XXXX → XXXX"""
+    m = re.search(r"(?:v=|youtu\.be/|shorts/)([A-Za-z0-9_-]{11})", url_or_id)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", url_or_id.strip()):
+        return url_or_id.strip()
+    raise ValueError(f"YouTube の URL か動画IDとして読めません: {url_or_id}")
+
+
+def set_manual(song, url_or_id):
+    """downloads.csv のその曲の行を「手動指定」にする（次の sheet-fetch でこの動画を使う）"""
+    _, lst = load_cached()
+    if song not in lst["songs"]:
+        near = [n for n in lst["songs"] if song in n or n in song]
+        raise ValueError(f"シートに「{song}」がありません" + (f"（候補: {', '.join(near)}）" if near else ""))
+    vid = video_id_from(url_or_id)
+    p = SHEET_DIR / "downloads.csv"
+    fields = ["song", "video_id", "title", "duration", "sheet_end", "diff", "status"]
+    rows = list(csv.DictReader(open(p, encoding="utf-8"))) if p.exists() else []
+    for r in rows:
+        if r["song"] == song:
+            r.update(video_id=vid, title="(手動指定)", duration="", diff="", status="manual")
+            break
+    else:
+        rows.append({"song": song, "video_id": vid, "title": "(手動指定)", "duration": "",
+                     "sheet_end": "", "diff": "", "status": "manual"})
+    SHEET_DIR.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+    return vid
+

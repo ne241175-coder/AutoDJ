@@ -80,3 +80,17 @@ def test_sheet_parsing():
     assert r["リライト"]["link_mid_leaf"] == {"out": 111, "in": 75}
     assert r["全力少年"]["link_mid_leaf"] is None
     assert l["songs"]["前前前世"] == "前前前世 RADWIMPS"
+
+
+def test_chorus_grace_allows_earlier_exit_only_at_chorus(songs):
+    ss = [s for s, _ in songs]
+    strict = plan_chain(ss, min_sec=70, chorus_grace=0)
+    loose = plan_chain(ss, min_sec=70, chorus_grace=20)
+    mid_s = strict["items"][1]["end"] - strict["items"][1]["start"]
+    mid_l = loose["items"][1]["end"] - loose["items"][1]["start"]
+    assert mid_s >= 70 - 1e-6
+    assert mid_l <= mid_s
+    # 猶予を使って早めに出る場合は、サビ終わりからだけ
+    for t, it in zip(loose["transitions"], loose["items"]):
+        if it["end"] - it["start"] < 70 - 1e-6:
+            assert t["kind"].startswith("サビ終わり"), t

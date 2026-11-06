@@ -127,9 +127,15 @@ def cmd_sheet_fetch(a):
     print(f"--- {ok}/{len(rows)} 曲。選んだ動画は data/sheet/downloads.csv（違えば video_id を正しいIDに、status を manual にして再実行）")
 
 
+def cmd_sheet_pick(a):
+    from .fetch_songs import set_manual
+    vid = set_manual(a.song, a.url)
+    print(f"「{a.song}」→ 動画 {vid} を手動指定しました。sheet-fetch --only \"{a.song}\" でダウンロードできます")
+
+
 def cmd_plan(a):
     from .mixplan import build_plan, describe, save_plan
-    plan = build_plan(a.songs, min_sec=a.min_sec, use_sheet=not a.no_sheet)
+    plan = build_plan(a.songs, min_sec=a.min_sec, use_sheet=not a.no_sheet, chorus_grace=a.chorus_grace)
     print(describe(plan))
     if a.out:
         save_plan(plan, a.out)
@@ -211,9 +217,15 @@ def main(argv=None):
     s.add_argument("--reselect", action="store_true", help="取り込み済みの曲も選び直す（status=manual の行は維持）")
     s.set_defaults(fn=cmd_sheet_fetch)
 
+    s = sub.add_parser("sheet-pick", help="ある曲に使う YouTube 動画を手で指定する")
+    s.add_argument("song", help="シートの曲名（例: 青成功でいいじゃない）")
+    s.add_argument("url", help="YouTube の URL または動画ID")
+    s.set_defaults(fn=cmd_sheet_pick)
+
     s = sub.add_parser("plan", help="曲順からつなぎ位置と再生区間を決める（ファイルは切らない）")
     s.add_argument("songs", nargs="+", help="曲名 または ID（流す順）")
     s.add_argument("--min-sec", type=float, default=90.0, help="1曲を流す最低秒数（既定90）")
+    s.add_argument("--chorus-grace", type=float, default=15.0, help="サビ終わりで出るときは最低秒数をこれだけ短くしてよい（既定15）")
     s.add_argument("--no-sheet", action="store_true", help="シートの構成・つなぎメモを使わず自動解析だけで決める")
     s.add_argument("-o", "--out", help="計画を JSON で保存")
     s.add_argument("--render", metavar="MIX.mp3", help="そのままミックスを書き出す")
