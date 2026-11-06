@@ -91,6 +91,13 @@ python -m backend.cli plan 青と夏 テオ リライト --min-sec 90 --render m
 - 1曲目は、出る位置から最低秒数以上前の区間頭（Aメロ優先）から流し始める
 - 重なりは、テンポが近ければ1小節（入る曲を伸縮して拍を揃え、低音を入れ替え）、遠ければ1拍で切り替え。`--styles fade,cut` でつなぎ方を指定
 
+BPM とキーを合わせる（backend/matching.py・audio_fx.py。既定でオン）
+- 入る曲を、いま鳴っている曲に合わせる。合わせた曲はその曲の最後までそのまま流し、次の曲はそれに合わせる
+- BPM: 入る曲のテンポを出る曲に揃える（半分・倍テンポも同一視、±8% まで。音程は変えない）
+- キー: 入る曲を ±2半音まで移調して、Camelot で同じか隣のキーにする（すでに相性が良ければ動かさない）
+- 加工は ffmpeg（rubberband フィルタがあれば高音質、なければ asetrate＋atempo）。`data/cache/fx/` に保存して使い回す。元の mp3 は変えない
+- 画面の「BPMを合わせる」「キーを合わせる」、コマンドの `plan --no-match-bpm --no-match-key` で切り替え
+
 ## 区切りの学習（シートの構成を正解にする）
 ```bash
 python -m backend.cli learn                       # シートの構成で学習 → data/model/boundary.json

@@ -5,13 +5,14 @@
 API（UI を差し替えてもこのまま使える）
   GET  /api/tracks              曲一覧（BPM・キー・解析済みか・シートの構成があるか）
   GET  /api/tracks/<id>         1曲の詳細（区間・小節頭・キー候補）。?auto=1 で自動検知の区間だけ
-  GET  /api/audio/<id>          mp3 そのもの（Range対応。ブラウザが必要な部分だけ取りに来る）
+  GET  /api/audio/<id>          mp3 そのもの（Range対応）。?rate=1.02&semi=-1 でテンポ・キーを合わせた音声
   GET  /api/routes              シートの「ルート曲→中間曲→曲名」とつなぎメモ
   GET  /api/tracks/<id>/wave    波形（ピーク値の列。初回だけ計算して保存）
   GET  /api/jacket/<id>         ジャケット画像（data/jackets/曲名.jpg があればそれ、なければ動画のサムネイル）
   POST /api/plan                {"songs": [id or 曲名...], "min_sec": 90, "chorus_grace": 15,
                                  "styles": ["fade", "cut", ...], "use_sheet": false（＝すべて自動検知）,
-                                 "links": {"0": {"out": 秒, "in": 秒}}（候補の選び直し）} → 再生計画
+                                 "links": {"0": {"out": 秒, "in": 秒}}（候補の選び直し）,
+                                 "match_bpm": true, "match_key": true（入る曲を出る曲に合わせる）} → 再生計画
                                  transitions[].explain（なぜここか）/ alternatives（ほかの候補）/ human（シートのメモ）
   POST /api/tracks/<id>/analyze 解析を（再）実行
 """
@@ -131,8 +132,17 @@ def audio(tid):
     r = connect().execute("SELECT file_path FROM tracks WHERE id=?", (tid,)).fetchone()
     if r is None or not Path(r["file_path"]).exists():
         abort(404)
+    rate = float(request.args.get("rate", 1.0))
+    semi = int(request.args.get("semi", 0))
+    path = r["file_path"]
+    if abs(rate - 1) > 1e-4 or semi:
+        # BPM・キーを合わせた音声（初回だけ数秒かけて作り、以後は使い回す）
+        from .audio_fx import processed
+        if not (0.5 <= rate <= 2.0 and -6 <= semi <= 6):
+            abort(400)
+        path = processed(path, tid, rate, semi)
     # conditional=True で Range リクエスト（途中から読む）に対応
-    return send_file(r["file_path"], conditional=True)
+    return send_file(path, conditional=True, mimetype="audio/mpeg")
 
 
 @app.get("/api/jacket/<int:tid>")
@@ -200,11 +210,13 @@ def plan():
     try:
         p = build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
                        chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"),
-                       links=body.get("links"))
+                       links=body.get("links"), match_bpm=body.get("match_bpm", True),
+                       match_key=body.get("match_key", True))
     except (KeyError, RuntimeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     for it in p["items"]:
-        it["audio_url"] = f"/api/audio/{it['track_id']}"
+        q = f"?rate={it['rate']:.5f}&semi={it['semitones']}" if (it.get("rate", 1.0) != 1.0 or it.get("semitones")) else ""
+        it["audio_url"] = f"/api/audio/{it['track_id']}{q}"
         it.pop("file", None)
     return jsonify(p)
 

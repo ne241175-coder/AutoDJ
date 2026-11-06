@@ -38,8 +38,16 @@ export async function loadBuffer(id, url) {
   return p;
 }
 
+// BPM・キーを合わせた計画は、加工済みの音声（audio_url）とその秒数（pb_*）で鳴らす
+export function toPlayback(plan) {
+  const items = plan.items.map((it) => ({ ...it, start: it.pb_start ?? it.start, end: it.pb_end ?? it.end }));
+  const transitions = plan.transitions.map((t) => ({ ...t, out: t.pb_out ?? t.out, in: t.pb_in ?? t.in }));
+  return { ...plan, items, transitions };
+}
+
 export class MixPlayer {
   constructor(plan) {
+    plan = toPlayback(plan);
     this.plan = plan;
     this.ctx = null;
     this.buffers = new Map();
@@ -57,19 +65,20 @@ export class MixPlayer {
 
   async load(onProgress) {
     this.ctx = audioContext();
-    const ids = [...new Set(this.plan.items.map((it) => it.track_id))];
+    // 同じ曲でも、テンポ・キーを変えた音声は別物として読む（audio_url ごと）
+    const urls = [...new Set(this.plan.items.map((it) => it.audio_url))];
     let done = 0;
-    await Promise.all(ids.map(async (id) => {
-      if (!this.buffers.has(id)) {
-        const it = this.plan.items.find((x) => x.track_id === id);
+    await Promise.all(urls.map(async (url) => {
+      if (!this.buffers.has(url)) {
+        const it = this.plan.items.find((x) => x.audio_url === url);
         try {
-          this.buffers.set(id, await loadBuffer(id, it.audio_url));
+          this.buffers.set(url, await loadBuffer(url, url));
         } catch (e) {
           throw new Error(`音声を取得できません: ${it.title}`);
         }
       }
       done += 1;
-      onProgress && onProgress(done / ids.length);
+      onProgress && onProgress(done / urls.length);
     }));
   }
 
@@ -97,7 +106,7 @@ export class MixPlayer {
 
     for (const seg of this.layout.segments) {
       if (seg.mixEnd <= T0) continue;
-      const buf = this.buffers.get(seg.track_id);
+      const buf = this.buffers.get(seg.audio_url);
       const src = ctx.createBufferSource();
       src.buffer = buf;
       const hp = ctx.createBiquadFilter();
@@ -149,7 +158,8 @@ export class MixPlayer {
   locate(mix) {
     const segs = this.layout.segments;
     for (let i = segs.length - 1; i >= 0; i--) {
-      if (mix >= segs[i].mixAnchor || i === 0) return { index: i, pos: segs[i].toPos(mix) };
+      // pos は元の曲の秒数（テンポを変えた音声なら倍率を戻す）
+      if (mix >= segs[i].mixAnchor || i === 0) return { index: i, pos: segs[i].toPos(mix) * segs[i].rate };
     }
     return { index: 0, pos: 0 };
   }
@@ -200,7 +210,7 @@ export function computeLayout(plan) {
       return HP_OFF;
     };
     segs.push({
-      index: i, track_id: it.track_id, title: it.title, posStart, posEnd,
+      index: i, track_id: it.track_id, audio_url: it.audio_url, rate: it.rate || 1, title: it.title, posStart, posEnd,
       mixStart: toMix(posStart), mixEnd: toMix(posEnd), mixAnchor: toMix(anchor),
       fadeIn, fadeOut, gainAt, hpAt, hpEvents, toPos: (m) => anchor + (m - b),
     });

@@ -94,3 +94,40 @@ def test_chorus_grace_allows_earlier_exit_only_at_chorus(songs):
     for t, it in zip(loose["transitions"], loose["items"]):
         if it["end"] - it["start"] < 70 - 1e-6:
             assert t["kind"].startswith("サビ終わり"), t
+
+
+def test_matching_bpm_and_key():
+    from types import SimpleNamespace
+    from backend.matching import apply_matching, tempo_ratio, best_semitones
+    assert abs(tempo_ratio(128, 124) - 128 / 124) < 1e-9
+    assert abs(tempo_ratio(140, 71) - 140 / 142) < 1e-9        # 倍テンポも同一視
+    assert tempo_ratio(128, 100) is None                          # ±8% を超えたら合わせない
+    assert best_semitones("8B", 7, "major")[1] <= 1               # G major(9B) → 隣か同じに
+    songs = [SimpleNamespace(bpm=120.0, camelot="8B", tonic=0, mode="major"),     # C major
+             SimpleNamespace(bpm=124.0, camelot="10B", tonic=2, mode="major")]    # D major
+    plan = {"items": [{"start": 0.0, "end": 100.0}, {"start": 20.0, "end": 120.0}],
+            "transitions": [{"from": 0, "to": 1, "out": 100.0, "in": 20.0}]}
+    apply_matching(plan, songs)
+    b = plan["items"][1]
+    assert abs(b["rate"] - 120 / 124) < 1e-4 and abs(b["bpm"] - 120) < 0.01
+    assert b["semitones"] == -2 and b["camelot"] == "8B"          # D → C で同じキー
+    assert abs(plan["transitions"][0]["pb_in"] - 20.0 / b["rate"]) < 1e-3
+    apply_matching(plan, songs, match_bpm=False, match_key=False)
+    assert plan["items"][1]["rate"] == 1.0 and plan["items"][1]["semitones"] == 0
+
+
+def test_audio_fx_keeps_length(tmp_path):
+    import numpy as np
+    import soundfile as sf
+    from backend import audio_fx
+    sr = 44100
+    t = np.arange(sr * 4) / sr
+    src = tmp_path / "a.wav"
+    sf.write(src, 0.3 * np.sin(2 * np.pi * 440 * t), sr)
+    audio_fx.FX_DIR = tmp_path / "fx"
+    out = audio_fx.processed(src, 1, rate=1.25, semitones=2)
+    y, osr = sf.read(out)
+    assert abs(len(y) / osr - 4 / 1.25) < 0.15                   # テンポだけ変わる
+    spec = np.abs(np.fft.rfft(y[int(osr * 0.5):int(osr * 2.5)] if y.ndim == 1 else y[int(osr * 0.5):int(osr * 2.5), 0]))
+    f = np.argmax(spec) * osr / (2 * osr)
+    assert abs(f - 440 * 2 ** (2 / 12)) < 8                      # 音程は +2半音

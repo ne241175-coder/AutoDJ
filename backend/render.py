@@ -50,8 +50,27 @@ def _stretch(y, rate):
     return np.stack([librosa.effects.time_stretch(ch, rate=rate) for ch in y])
 
 
+def _playback_plan(plan):
+    """BPM・キーを合わせた計画なら、加工済みの音声とその秒数に置き換える"""
+    if not any(it.get("rate", 1.0) != 1.0 or it.get("semitones", 0) for it in plan["items"]):
+        return plan["items"], plan["transitions"]
+    from .audio_fx import processed
+    items = []
+    for it in plan["items"]:
+        x = dict(it)
+        x["file"] = str(processed(it["file"], it["track_id"], it.get("rate", 1.0), it.get("semitones", 0)))
+        x["start"], x["end"] = it.get("pb_start", it["start"]), it.get("pb_end", it["end"])
+        items.append(x)
+    trans = []
+    for t in plan["transitions"]:
+        x = dict(t)
+        x["out"], x["in"] = t.get("pb_out", t["out"]), t.get("pb_in", t["in"])
+        trans.append(x)
+    return items, trans
+
+
 def render(plan, out_path, gain_db=-1.0):
-    items, trans = plan["items"], plan["transitions"]
+    items, trans = _playback_plan(plan)
     pieces = []  # 時系列に並ぶ音声
     cue = []
     t_mix = 0.0

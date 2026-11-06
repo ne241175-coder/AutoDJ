@@ -44,6 +44,8 @@ class Song:
     structure_source: str  # "sheet" or "auto"
     sheet_offset: float = 0.0  # シートの秒数 → 音源の秒数 のずらし量
     energy: list = field(default_factory=list)   # 小節ごとの音の大きさ（曲内で 0〜1）
+    tonic: int = None     # キーの主音（0=C）と長調/短調。移調でキーを合わせるときに使う
+    mode: str = None
 
     def energy_near(self, t, before, n=2):
         """t の直前（before=True）／直後 n 小節の音の大きさ（0〜1）。分からなければ None"""
@@ -89,7 +91,8 @@ def load_song(con, key, sheet_structure=None):
         src = "auto"
     return Song(row["id"], row["title"], row["file_path"], a["duration"], a["tempo"]["bpm"],
                 a["key"]["camelot"], a["bars"], sections, src, offset,
-                energy=a["structure"].get("bar_energy") or [])
+                energy=a["structure"].get("bar_energy") or [],
+                tonic=a["key"].get("tonic"), mode=a["key"].get("mode"))
 
 
 # ---------- 相性 ----------
@@ -409,9 +412,10 @@ def apply_styles(plan, styles):
 
 
 def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_grace=DEFAULT_CHORUS_GRACE,
-               styles=None, links=None):
+               styles=None, links=None, match_bpm=True, match_key=True):
     """keys: 曲名 or track_id のリスト（曲順）。シートのつなぎメモがあれば自動で使う。
     use_sheet=False なら、構造もつなぎ位置もすべて自動検知（シートの手入力はお手本として比べるだけ）。
+    match_bpm / match_key: 入る曲のテンポ・キーを、出る曲に合わせる（matching.py）。
     links: {つなぎ目の番号: {"out": 秒, "in": 秒}} 画面で選び直した候補（最優先）"""
     con = con or connect()
     structure, lst = ({}, {"routes": []})
@@ -426,6 +430,9 @@ def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_g
     songs = [load_song(con, k, structure) for k in keys]
     plan = _build(songs, lst, min_sec, chorus_grace, links)
     _attach_reference(plan, songs, sheet_lst, con)
+    # BPM とキーを合わせる（入る曲を、いま鳴っている曲に合わせる）
+    from .matching import apply_matching
+    apply_matching(plan, songs, match_bpm=match_bpm, match_key=match_key)
     return apply_styles(plan, styles)
 
 

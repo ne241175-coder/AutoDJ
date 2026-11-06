@@ -88,8 +88,11 @@ input[type=text] { cursor: text; }
 .chain { position: absolute; left: 0; right: 0; top: 160px; height: 400px; overflow-x: auto; overflow-y: visible; }
 .chain::-webkit-scrollbar { height: 6px; } .chain::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 .cj { position: absolute; }
-.cj .t { margin-top: 12px; font-weight: 800; font-size: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cj .r { margin-top: 4px; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cj .t { margin-top: 8px; font-weight: 800; font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cj .r.fx { overflow: visible; width: 240px; }
+.cj .r.fx b { color: #ffe600; font-weight: 800; }
+.why .ok { color: #ffe600; font-weight: 700; }
+.cj .r { margin-top: 2px; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .arrow { position: absolute; display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .arrow button { transition: transform .15s; }
 .arrow button:hover { transform: scale(1.12); }

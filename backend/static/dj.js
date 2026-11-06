@@ -383,7 +383,8 @@ function useMixPeaks(plan, layout, n = 900) {
           if (m < s.mixStart || m > s.mixEnd) continue;
           const w = waves.get(s.track_id), d = durs.get(s.track_id);
           if (!w || !d) continue;
-          v = Math.max(v, w[Math.min(w.length - 1, Math.floor((s.toPos(m) / d) * w.length))] * s.gainAt(m));
+          const pos = s.toPos(m) * s.rate;   // 元の曲の秒数
+          v = Math.max(v, w[Math.min(w.length - 1, Math.floor((pos / d) * w.length))] * s.gainAt(m));
         }
         out[x] = v;
       }
@@ -414,6 +415,13 @@ function SongStrip({ track, item, auto, width, mark, markColor, markLabel, side 
     ${mark != null && html`<div class=${`pin ${side}`} style=${{ left: x(mark) }}>
       <i style=${{ background: markColor }}></i><span style=${{ color: markColor }}>${markLabel} ${fmt(mark)}</span></div>`}
   </div>`;
+}
+
+// キーの相性の言葉（合わせた後のキーどうしで）
+function keyWord(t, mark = false) {
+  const d = t.matched ? t.matched.key_distance_after : (t.explain && t.explain.key ? t.explain.key.distance : null);
+  const w = d === 0 ? "同じキー" : d === 1 ? "隣どうし" : d === 2 ? "2つ隣" : "遠い";
+  return mark ? `${d <= 1 ? "◎" : d === 2 ? "○" : "△"} ${w}` : w;
 }
 
 function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previewing }) {
@@ -451,8 +459,13 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
         <${SongStrip} track=${tb} item=${b} auto=${auto} width=${WD} mark=${t.in} markColor=${PICK[k + 1]} markLabel="ここから入る" side="up" />
       </div>
       <div class="ex-right">
-        <div class="why"><span>テンポ</span><b>${tempo.a} → ${tempo.b} BPM</b><em>${tempoMark} 差 ${(tempo.gap * 100).toFixed(1)}%</em></div>
-        <div class="why"><span>キー</span><b>${key.a} → ${key.b}</b><em>${keyMark}</em></div>
+        <div class="why"><span>テンポ</span><b>${a.bpm.toFixed(1)} → ${(b.orig_bpm ?? b.bpm).toFixed(1)} BPM</b>
+          <em>${b.rate !== 1 ? html`<span class="ok">合わせて ${b.bpm.toFixed(1)}（×${b.rate.toFixed(3)}、音程そのまま）</span>`
+            : (b.match_note || []).some((x) => x.startsWith("テンポ")) ? "△ 差が大きいので合わせない"
+            : `${tempoMark} 差 ${(tempo.gap * 100).toFixed(1)}%`}</em></div>
+        <div class="why"><span>キー</span><b>${a.camelot} → ${b.orig_camelot ?? b.camelot}</b>
+          <em>${b.semitones ? html`<span class="ok">${b.semitones > 0 ? "+" : ""}${b.semitones}半音 移調して ${b.camelot}（${keyWord(t)}）</span>`
+            : keyWord(t, true)}</em></div>
         ${ex.energy && ex.energy.out != null && html`<div class="why"><span>音の勢い</span>
           <b>${pct(ex.energy.out)} → ${pct(ex.energy.in)}</b><em>${ex.energy.fit >= 0.8 ? "◎" : ex.energy.fit >= 0.5 ? "○" : "△"} つながり ${pct(ex.energy.fit)}</em></div>`}
         ${auto && html`<div class="why"><span>区切りの確かさ</span><b>出 ${pct(ex.confidence && ex.confidence.out)} / 入 ${pct(ex.confidence && ex.confidence.in)}</b>
@@ -470,7 +483,7 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
   </div>`;
 }
 
-function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec, auto, setAuto, onBack, onStart, onError }) {
+function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec, auto, setAuto, match, setMatch, onBack, onStart, onError }) {
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const [base, setBase] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -486,17 +499,20 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     let alive = true;
     setBusy(true);
     const tm = setTimeout(() => {
-      post("/api/plan", { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links })
+      post("/api/plan", { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links,
+                          match_bpm: match.bpm, match_key: match.key })
         .then((p) => { alive && setBase(p); })
         .catch((e) => alive && onError(e.message))
         .finally(() => alive && setBusy(false));
     }, 200);
     return () => { alive = false; clearTimeout(tm); };
-  }, [selected.join(","), minSec, auto, JSON.stringify(links)]);
+  }, [selected.join(","), minSec, auto, JSON.stringify(links), match.bpm, match.key]);
+  // 音声は先に読み込んでおく（テンポ・キーを合わせた音声はサーバが作るので少し待つ）
   useEffect(() => {
+    if (!base) return;
     audioContext();
-    selected.forEach((id) => loadBuffer(id, `/api/audio/${id}`).catch(() => {}));
-  }, [selected.join(",")]);
+    base.items.forEach((it) => loadBuffer(it.audio_url, it.audio_url).catch(() => {}));
+  }, [base && base.items.map((it) => it.audio_url).join(",")]);
 
   const plan = useMemo(() => (base ? withStyles(base, styles) : null), [base, styles.join(",")]);
   const layout = useMemo(() => (plan ? new MixPlayer(plan).layout : null), [plan]);
@@ -537,9 +553,9 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     stopPreview();
   };
 
-  const S = 190, gap = 210, x0 = (W - (3 * S + 2 * gap)) / 2;
+  const S = 166, gap = 230, x0 = (W - (3 * S + 2 * gap)) / 2;
   const xOf = (i) => x0 + i * (S + gap);
-  const Y = 96;
+  const Y = 88;
 
   return html`<div class="screen" onClick=${() => { setOpen(null); }}>
     <div class="h1" style=${{ left: 55, top: 22, fontSize: 38 }}>繋ぎ方を選んでね</div>
@@ -555,12 +571,14 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
         <${Jacket} track=${t} size=${S} style=${{ boxShadow: `0 0 0 4px ${PICK[i]}` }} />
         <div class="t">${t ? t.title : id}</div>
         <div class="r">${it ? `${fmt(it.start)} → ${fmt(it.end)}（${Math.round(it.end - it.start)}秒）` : busy ? "計算中…" : ""}</div>
+        ${it && html`<div class="r fx">${Math.round(it.bpm)} BPM${it.rate !== 1 ? html` <b>×${it.rate.toFixed(3)}</b>` : ""}
+          ・${it.camelot}${it.semitones ? html` <b>(${it.semitones > 0 ? "+" : ""}${it.semitones})</b>` : ""}</div>`}
       </div>`;
     })}
     ${selected.slice(1).map((_, k) => {
       const st = styles[k] || "auto";
       const cx = xOf(k) + S + gap / 2;
-      return html`<div key=${k} class=${`arrow${sel === k ? " sel" : ""}`} style=${{ left: cx - 90, width: 180, top: Y + 30 }}>
+      return html`<div key=${k} class=${`arrow${sel === k ? " sel" : ""}`} style=${{ left: cx - 90, width: 180, top: Y + 20 }}>
         <button title="繋ぎ方を選ぶ" onClick=${(e) => { e.stopPropagation(); setSel(k); setOpen(open === k ? null : k); }}>
           <${Tri} size=${84} color=${STYLE[st].color} /></button>
         <div class="lab" style=${{ color: STYLE[st].color }}>${STYLE[st].label}</div>
@@ -593,6 +611,8 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     <div class="ctl" style=${{ top: 776, left: 250 }} onClick=${(e) => e.stopPropagation()}>
       <span>1曲を最低 <b>${minSec}</b> 秒流す <input type="range" min="45" max="180" step="5" value=${minSec}
         onInput=${(e) => setMinSec(+e.target.value)} /></span>
+      <label><input type="checkbox" checked=${match.bpm} onChange=${(e) => setMatch({ ...match, bpm: e.target.checked })} />BPMを合わせる</label>
+      <label><input type="checkbox" checked=${match.key} onChange=${(e) => setMatch({ ...match, key: e.target.checked })} />キーを合わせる</label>
       <span>全体 <b>${layout ? fmt(layout.total) : "-:--"}</b></span>
       ${Object.keys(links).length > 0 && html`<button class="mini" onClick=${() => setLinks({})}>候補を元に戻す</button>`}
     </div>
@@ -728,6 +748,7 @@ function App() {
   const [styles, setStyles] = useState(["auto", "auto"]);
   const [minSec, setMinSec] = useState(90);
   const [auto, setAuto] = useState(true);       // 発表用: 既定は「自動検知」
+  const [match, setMatch] = useState({ bpm: true, key: true });   // BPM・キーを合わせる
   const [player, setPlayer] = useState(null);
   const [plan, setPlan] = useState(null);
   const [load, setLoad] = useState(null);
@@ -785,6 +806,7 @@ function App() {
     onBack=${() => setPicks(picks.slice(0, -1))} />`;
   else if (screen === "connect") body = html`<${ConnectScreen} tracks=${tracks} selected=${picks.map((t) => t.id)}
     styles=${styles} setStyles=${setStyles} minSec=${minSec} setMinSec=${setMinSec} auto=${auto} setAuto=${setAuto}
+    match=${match} setMatch=${setMatch}
     onError=${setErr} onBack=${() => { setPicks(picks.slice(0, 2)); setScreen("select"); }} onStart=${start} />`;
   else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player}
     onBack=${() => { player.stop(); setScreen("connect"); }} />`;
