@@ -55,16 +55,30 @@ def render(plan, out_path, gain_db=-1.0):
     pieces = []  # 時系列に並ぶ音声
     cue = []
     t_mix = 0.0
+    cut_in_next = False
     for i, it in enumerate(items):
         start, end = it["start"], it["end"]
         nxt = trans[i] if i < len(trans) else None
         # この曲が単独で鳴る区間: start 〜 次の重なりの手前（入りの重なりは前の曲の処理で生成済み）
         L_out = (nxt["overlap_beats"] * 60.0 / it["bpm"]) if nxt else 0.0
         body = _load(it["file"], start, max(0.01, end - start - L_out))
+        if cut_in_next:
+            k = min(int(0.015 * SR), body.shape[1])
+            body = body.copy()
+            body[:, :k] *= np.linspace(0, 1, k)
+            cut_in_next = False
         pieces.append(body)
         cue.append((t_mix, it["title"], start))
         t_mix += body.shape[1] / SR
 
+        if nxt and nxt["overlap_beats"] <= 0:
+            # カットイン: 小節頭でそのまま切り替える（プチッと鳴らないよう 15ms だけ音量を絞る）
+            k = min(int(0.015 * SR), body.shape[1])
+            if k:
+                pieces[-1] = body.copy()
+                pieces[-1][:, -k:] *= np.linspace(1, 0, k)
+            cut_in_next = True
+            continue
         if nxt:
             b = items[i + 1]
             n = int(round(L_out * SR))
@@ -72,7 +86,7 @@ def render(plan, out_path, gain_db=-1.0):
             # 入る曲: in の手前 overlap_beats 拍（入る曲のテンポで）を読み、出る曲のテンポに伸縮
             beats = nxt["overlap_beats"]
             L_b = beats * 60.0 / b["bpm"]
-            b_head = _load(b["file"], nxt["in"] - L_b, L_b)
+            b_head = _load(b["file"], max(0.0, nxt["in"] - L_b), L_b)
             if nxt["tempo_gap"] <= 0.06:
                 b_head = _stretch(b_head, rate=(b_head.shape[1] / SR) / L_out)
             b_head = _fit(b_head, n)
