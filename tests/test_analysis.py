@@ -89,3 +89,12 @@ def test_variable_tempo_follows_drift(tmp_path, drift):
     assert r["tempo"]["uncertain_beat_ranges"], "ドラムなし区間が不確実として報告されていない"
     first_unc = r["tempo"]["uncertain_beat_ranges"][0]
     assert first_unc[0] < tb[8]
+
+
+def test_limit_sections():
+    from backend.analysis.structure import limit_sections
+    bounds = list(range(0, 80, 4))           # 19 区間
+    strength = {b: (b % 8 == 0) * 1.0 + b / 1000 for b in bounds}
+    out, removed = limit_sections(bounds, strength, max_sections=14)
+    assert len(out) - 1 == 14 and removed == 5 and out[0] == 0 and out[-1] == 76
+    assert all(b % 8 != 0 for b in set(bounds) - set(out))  # 外れるのは弱い（8の倍数でない）境界だけ

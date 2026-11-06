@@ -53,6 +53,8 @@ def cmd_analyze(a):
             r = analyze_track(tid, con=con, force=a.force, verbose=True)
             print(f"   → {r['tempo']['bpm']} BPM / {r['key']['name']} ({r['key']['camelot']}) / "
                   f"{len(r['structure']['sections'])} セクション / {r['elapsed_sec']}s")
+            if r["structure"].get("notice"):
+                print(f"   ⚠ {r['structure']['notice']}（show {tid} で確認してください）")
         except Exception as e:  # 1曲の失敗で全体を止めない
             print(f"   × 失敗: {e}")
 
@@ -158,6 +160,11 @@ def cmd_sheet_eval(a):
     print(evaluate_sheet())
 
 
+def cmd_learn(a):
+    from .learn import learn
+    learn(truth_json=a.truth, threshold=a.threshold, min_confidence=a.min_confidence)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="autodj", description="AutoDJ（取り込み・解析）")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -233,6 +240,14 @@ def main(argv=None):
 
     s = sub.add_parser("sheet-eval", help="シートの構成を正解として自動構造解析を採点")
     s.set_defaults(fn=cmd_sheet_eval)
+
+    s = sub.add_parser("learn", help="シートの構成（と truth.json）を正解に、区切り確率モデルを学習する")
+    s.add_argument("--truth", help="truth.json（任意。シートの構成に加えて使う）")
+    s.add_argument("--threshold", type=float, default=None,
+                   help="この確率未満の区切りは採らない（既定: 答え合わせで一番良い値を自動で選ぶ）")
+    s.add_argument("--min-confidence", type=float, default=0.0,
+                   help="信頼度（正解の見込み）がこれ未満の区切りを捨てる。例 0.75（既定0 = 捨てない）")
+    s.set_defaults(fn=cmd_learn)
 
     s = sub.add_parser("genres", help="使えるジャンル一覧")
     s.set_defaults(fn=lambda a: print(", ".join(GENRES)))

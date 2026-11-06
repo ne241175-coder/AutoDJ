@@ -33,7 +33,7 @@ def songs(tmp_path_factory):
 
 def test_min_seconds_respected(songs):
     ss = [s for s, _ in songs]
-    plan = plan_chain(ss, min_sec=60)
+    plan = plan_chain(ss, min_sec=60, chorus_grace=0)   # サビ終わりの猶予なしで厳密に
     print(describe(plan))
     for it in plan["items"][1:-1]:
         assert it["end"] - it["start"] >= 60 - 1e-6

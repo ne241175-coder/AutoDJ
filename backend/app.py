@@ -59,12 +59,18 @@ def _sheet():
 def _sections(row, analysis, structure):
     sheet = structure.get(row["title"])
     if sheet:
+        secs = sheet["sections"]
+        if analysis:
+            # シートの秒数は計測した動画の時刻なので、取り込んだ音源の時刻に合わせる
+            from .align import aligned_sections
+            secs, _ = aligned_sections(sheet, analysis)
         return "sheet", [{"role": s["role"], "label": s["label"], "start": s["start"], "end": s["end"]}
-                         for s in sheet["sections"]]
+                         for s in secs]
     if analysis:
         return "auto", [{"role": AUTO_ROLE.get(s["role"], "other"),
                          "label": ROLE_JA.get(AUTO_ROLE.get(s["role"], "other")),
-                         "start": s["start"], "end": s["end"]} for s in analysis["structure"]["sections"]]
+                         "start": s["start"], "end": s["end"],
+                         "confidence": s.get("boundary_confidence")} for s in analysis["structure"]["sections"]]
     return None, []
 
 

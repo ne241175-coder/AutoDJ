@@ -42,6 +42,7 @@ class Song:
     bars: list            # 小節頭の時刻（秒）
     sections: list        # [{role, label, start, end}]
     structure_source: str  # "sheet" or "auto"
+    sheet_offset: float = 0.0  # シートの秒数 → 音源の秒数 のずらし量
 
     def snap(self, t, tol=1.6):
         """t を最寄りの小節頭へ。tol 秒以内に小節頭がなければそのまま"""
@@ -64,16 +65,19 @@ def load_song(con, key, sheet_structure=None):
     if a is None:
         raise RuntimeError(f"未解析です: [{row['id']}] {row['title']}（analyze を実行してください）")
     sheet = (sheet_structure or {}).get(row["title"])
+    offset = 0.0
     if sheet:
+        from .align import aligned_sections
+        aligned, offset = aligned_sections(sheet, a)   # 計測した動画と音源のズレを補正
         sections = [{"role": s["role"], "label": s["label"], "start": s["start"], "end": s["end"]}
-                    for s in sheet["sections"]]
+                    for s in aligned]
         src = "sheet"
     else:
         sections = [{"role": AUTO_ROLE.get(s["role"], "other"), "label": ROLE_JA.get(AUTO_ROLE.get(s["role"], "other")),
                      "start": s["start"], "end": s["end"]} for s in a["structure"]["sections"]]
         src = "auto"
     return Song(row["id"], row["title"], row["file_path"], a["duration"], a["tempo"]["bpm"],
-                a["key"]["camelot"], a["bars"], sections, src)
+                a["key"]["camelot"], a["bars"], sections, src, offset)
 
 
 # ---------- 相性 ----------
@@ -310,10 +314,15 @@ def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_g
     for i in range(len(songs) - 1):
         a, b = songs[i].title, songs[i + 1].title
         for r in lst.get("routes", []):
+            link = None
             if r["middle"] == a and r["leaf"] == b and r.get("link_mid_leaf"):
-                manual[(i, i + 1)] = r["link_mid_leaf"]
+                link = r["link_mid_leaf"]
             if r["root"] == a and r["middle"] == b and r.get("link_root_mid"):
-                manual[(i, i + 1)] = r["link_root_mid"]
+                link = r["link_root_mid"]
+            if link:
+                # つなぎメモもシートの秒数なので、それぞれの曲のズレを足す
+                manual[(i, i + 1)] = {"out": link["out"] + songs[i].sheet_offset,
+                                      "in": link["in"] + songs[i + 1].sheet_offset}
     return apply_styles(plan_chain(songs, min_sec=min_sec, manual_links=manual, chorus_grace=chorus_grace), styles)
 
 
