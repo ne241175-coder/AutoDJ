@@ -107,6 +107,50 @@ def cmd_evaluate(a):
     print(evaluate(a.truth))
 
 
+def cmd_sheet_sync(a):
+    from .sheet import fetch_csv, load
+    if not a.offline:
+        paths = fetch_csv(a.sheet_id)
+        print("取得:", ", ".join(str(p) for p in paths.values()))
+    structure, lst = load()
+    print(f"構成入力: {len(structure)} 曲（終了まで入力済み） / 曲リスト: {len(lst['routes'])} 行, 曲 {len(lst['songs'])} 種類")
+    n = sum(1 for r in lst["routes"] if r["link_mid_leaf"])
+    print(f"つなぎメモ（中間曲→曲名）の秒数を読めた行: {n}")
+
+
+def cmd_sheet_fetch(a):
+    from .fetch_songs import fetch_all
+    rows = fetch_all(only=a.only or None, dry_run=a.dry_run)
+    ok = sum(r["status"] in ("downloaded", "already", "selected") for r in rows)
+    print(f"--- {ok}/{len(rows)} 曲。選んだ動画は data/sheet/downloads.csv（違えば video_id を書き換えて再実行）")
+
+
+def cmd_plan(a):
+    from .mixplan import build_plan, describe, save_plan
+    plan = build_plan(a.songs, min_sec=a.min_sec, use_sheet=not a.no_sheet)
+    print(describe(plan))
+    if a.out:
+        save_plan(plan, a.out)
+        print(f"保存: {a.out}")
+    if a.render:
+        from .render import render
+        mp3, cue = render(plan, a.render)
+        print(f"書き出し: {mp3}（目次 {cue}）")
+
+
+def cmd_render(a):
+    import json
+    from .render import render
+    plan = json.load(open(a.plan, encoding="utf-8"))
+    mp3, cue = render(plan, a.out)
+    print(f"書き出し: {mp3}（目次 {cue}）")
+
+
+def cmd_sheet_eval(a):
+    from .evaluate import evaluate_sheet
+    print(evaluate_sheet())
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="autodj", description="AutoDJ（取り込み・解析）")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -148,6 +192,32 @@ def main(argv=None):
     s = sub.add_parser("evaluate", help="手付け正解と比較して精度を出す")
     s.add_argument("truth")
     s.set_defaults(fn=cmd_evaluate)
+
+    s = sub.add_parser("sheet-sync", help="スプレッドシートを取り込む（構成・つなぎメモ）")
+    s.add_argument("--sheet-id", default="1tqNzwou98-HD8sY1n_6fh7o9hl4Geh5TA833hjDkch8")
+    s.add_argument("--offline", action="store_true", help="data/sheet/*.csv を読み直すだけ")
+    s.set_defaults(fn=cmd_sheet_sync)
+
+    s = sub.add_parser("sheet-fetch", help="シートの曲を YouTube から一括取り込み（長さが合う動画を自動選択）")
+    s.add_argument("--only", nargs="*", help="この曲名だけ")
+    s.add_argument("--dry-run", action="store_true", help="選ぶ動画を表示するだけ")
+    s.set_defaults(fn=cmd_sheet_fetch)
+
+    s = sub.add_parser("plan", help="曲順からつなぎ位置と再生区間を決める（ファイルは切らない）")
+    s.add_argument("songs", nargs="+", help="曲名 または ID（流す順）")
+    s.add_argument("--min-sec", type=float, default=90.0, help="1曲を流す最低秒数（既定90）")
+    s.add_argument("--no-sheet", action="store_true", help="シートの構成・つなぎメモを使わず自動解析だけで決める")
+    s.add_argument("-o", "--out", help="計画を JSON で保存")
+    s.add_argument("--render", metavar="MIX.mp3", help="そのままミックスを書き出す")
+    s.set_defaults(fn=cmd_plan)
+
+    s = sub.add_parser("render", help="計画 JSON からミックスを書き出す")
+    s.add_argument("plan")
+    s.add_argument("-o", "--out", default="mix.mp3")
+    s.set_defaults(fn=cmd_render)
+
+    s = sub.add_parser("sheet-eval", help="シートの構成を正解として自動構造解析を採点")
+    s.set_defaults(fn=cmd_sheet_eval)
 
     s = sub.add_parser("genres", help="使えるジャンル一覧")
     s.set_defaults(fn=lambda a: print(", ".join(GENRES)))

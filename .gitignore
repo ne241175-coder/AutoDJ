@@ -1,8 +1,12 @@
 data/audio/
 data/analysis/
+data/sheet/
 data/*.sqlite3
 __pycache__/
 .venv/
 .pytest_cache/
 *_backup.md
 .DS_Store
+mix*.mp3
+mix*.wav
+mix*.txt
