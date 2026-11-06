@@ -262,14 +262,40 @@ def describe(plan):
         clock += it["end"] - it["start"]
         if i < len(plan["transitions"]):
             t = plan["transitions"][i]
-            lines.append(f"   ↓ {t['kind']}  {fmt(t['out'])} → {fmt(t['in'])}  "
+            lines.append(f"   ↓ {t['kind']}【{t.get('style_label', 'おまかせ')}】  {fmt(t['out'])} → {fmt(t['in'])}  "
                          f"score {t['score']}  ({', '.join(t['reasons'])})")
     for w in plan["warnings"]:
         lines.append(f"※ {w}")
     return "\n".join(lines)
 
 
-def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_grace=DEFAULT_CHORUS_GRACE):
+# つなぎ方（UI の「繋ぎ方を選んでね」）
+#   auto: おまかせ（テンポが近ければ1小節、遠ければ1拍で混ぜる）
+#   fade: フェードイン（長めに重ねてじわっと入れ替える）
+#   cut : カットイン（小節頭でスパッと切り替える）
+STYLES = {"auto": "おまかせ", "fade": "フェードイン", "cut": "カットイン"}
+
+
+def apply_styles(plan, styles):
+    """styles: つなぎ目ごとの "auto"/"fade"/"cut"（足りない分は auto）。plan を書き換えて返す"""
+    styles = list(styles or [])
+    items = plan["items"]
+    for k, t in enumerate(plan["transitions"]):
+        st = styles[k] if k < len(styles) and styles[k] in STYLES else "auto"
+        t["style"], t["style_label"] = st, STYLES[st]
+        if st == "cut":
+            t["overlap_beats"] = 0
+        elif st == "fade":
+            a, b = items[k], items[k + 1]
+            beats = 16 if t["tempo_gap"] <= 0.06 else 8
+            # 重ねる長さは、入る曲の in より前・出る曲の再生時間の 1/3 までに収める
+            room = min(t["in"] * b["bpm"] / 60.0, (a["end"] - a["start"]) / 3 * a["bpm"] / 60.0)
+            t["overlap_beats"] = int(max(1, min(beats, room)))
+    return plan
+
+
+def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_grace=DEFAULT_CHORUS_GRACE,
+               styles=None):
     """keys: 曲名 or track_id のリスト（曲順）。シートのつなぎメモがあれば自動で使う"""
     con = con or connect()
     structure, lst = ({}, {"routes": []})
@@ -288,7 +314,7 @@ def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_g
                 manual[(i, i + 1)] = r["link_mid_leaf"]
             if r["root"] == a and r["middle"] == b and r.get("link_root_mid"):
                 manual[(i, i + 1)] = r["link_root_mid"]
-    return plan_chain(songs, min_sec=min_sec, manual_links=manual, chorus_grace=chorus_grace)
+    return apply_styles(plan_chain(songs, min_sec=min_sec, manual_links=manual, chorus_grace=chorus_grace), styles)
 
 
 def save_plan(plan, path):

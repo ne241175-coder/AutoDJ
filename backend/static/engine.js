@@ -10,12 +10,40 @@
 
 const HP_ON = 180;   // 低音カット時のハイパス周波数(Hz)
 const HP_OFF = 10;   // 実質スルー
+const CUT = 0.012;   // カットイン: プチッと鳴らない程度の極短いフェード(秒)
+
+// AudioContext と読み込んだ音声は、計画を作り直しても使い回す
+let sharedCtx = null;
+const BUFFERS = new Map();
+export function audioContext() {
+  if (!sharedCtx) {
+    sharedCtx = new (window.AudioContext || window.webkitAudioContext)();
+    sharedCtx.master = sharedCtx.createGain();
+    sharedCtx.analyser = sharedCtx.createAnalyser();
+    sharedCtx.analyser.fftSize = 2048;
+    sharedCtx.analyser.smoothingTimeConstant = 0.75;
+    sharedCtx.master.connect(sharedCtx.analyser).connect(sharedCtx.destination);
+  }
+  return sharedCtx;
+}
+export async function loadBuffer(id, url) {
+  if (BUFFERS.has(id)) return BUFFERS.get(id);
+  const p = (async () => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`音声を取得できません (${res.status})`);
+    return await audioContext().decodeAudioData(await res.arrayBuffer());
+  })();
+  BUFFERS.set(id, p);
+  p.catch(() => BUFFERS.delete(id));
+  return p;
+}
 
 export class MixPlayer {
   constructor(plan) {
     this.plan = plan;
     this.ctx = null;
     this.buffers = new Map();
+    this.timer = null;
     this.nodes = [];
     this.playing = false;
     this.t0 = 0;        // 再生開始したミックス時刻
@@ -25,21 +53,24 @@ export class MixPlayer {
 
   get duration() { return this.layout.total; }
 
+  get analyser() { return audioContext().analyser; }
+
   async load(onProgress) {
-    if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.ctx = audioContext();
     const ids = [...new Set(this.plan.items.map((it) => it.track_id))];
     let done = 0;
-    for (const id of ids) {
+    await Promise.all(ids.map(async (id) => {
       if (!this.buffers.has(id)) {
         const it = this.plan.items.find((x) => x.track_id === id);
-        const res = await fetch(it.audio_url);
-        if (!res.ok) throw new Error(`音声を取得できません: ${it.title}`);
-        const buf = await this.ctx.decodeAudioData(await res.arrayBuffer());
-        this.buffers.set(id, buf);
+        try {
+          this.buffers.set(id, await loadBuffer(id, it.audio_url));
+        } catch (e) {
+          throw new Error(`音声を取得できません: ${it.title}`);
+        }
       }
       done += 1;
       onProgress && onProgress(done / ids.length);
-    }
+    }));
   }
 
   now() {
@@ -47,7 +78,13 @@ export class MixPlayer {
     return this.t0 + (this.ctx.currentTime - this.ctxStart);
   }
 
-  async play(fromMix = 0) {
+  // つなぎ目 k の前後だけ試聴する
+  async preview(k, before = 8, after = 8) {
+    const t = this.layout.transitionsMix[k];
+    await this.play(Math.max(0, t - before), t + after);
+  }
+
+  async play(fromMix = 0, untilMix = null) {
     await this.load();
     this.stop();
     if (this.ctx.state === "suspended") await this.ctx.resume();
@@ -67,7 +104,7 @@ export class MixPlayer {
       hp.type = "highpass";
       hp.Q.value = 0.7;
       const gain = ctx.createGain();
-      src.connect(hp).connect(gain).connect(ctx.destination);
+      src.connect(hp).connect(gain).connect(ctx.master);
 
       const skip = Math.max(0, T0 - seg.mixStart);            // 途中から再生する場合
       const offset = seg.posStart + skip;
@@ -95,9 +132,13 @@ export class MixPlayer {
       this.nodes.push(src);
     }
     this.playing = true;
+    const until = untilMix == null ? this.layout.total : Math.min(untilMix, this.layout.total);
+    this.timer = setTimeout(() => { this.stop(); this.onend && this.onend(); },
+                            Math.max(0, (until - T0) * 1000 + 150));
   }
 
   stop() {
+    clearTimeout(this.timer);
     if (this.playing) this.t0 = this.now();
     for (const n of this.nodes) { try { n.stop(); } catch (e) { /* 既に停止 */ } }
     this.nodes = [];
@@ -128,8 +169,9 @@ export function computeLayout(plan) {
     const toMix = (p) => b + (p - anchor);
     const prev = i > 0 ? transitions[i - 1] : null;
     const next = i < transitions.length ? transitions[i] : null;
-    const Lin = prev ? (prev.overlap_beats * 60) / it.bpm : 0;
-    const Lout = next ? (next.overlap_beats * 60) / it.bpm : 0;
+    const len = (t) => (!t ? 0 : t.overlap_beats > 0 ? (t.overlap_beats * 60) / it.bpm : CUT);
+    const Lin = len(prev);
+    const Lout = len(next);
     const posStart = Math.max(0, it.start - Lin);
     const posEnd = it.end;
     const fadeIn = prev ? { mixFrom: toMix(it.start - Lin), mixTo: toMix(it.start) } : null;
@@ -147,11 +189,14 @@ export function computeLayout(plan) {
       return g;
     };
     const hpEvents = [];
-    if (fadeIn) hpEvents.push([(fadeIn.mixFrom + fadeIn.mixTo) / 2, HP_OFF]);
-    if (fadeOut) hpEvents.push([(fadeOut.mixFrom + fadeOut.mixTo) / 2, HP_ON]);
+    // 低音の入れ替え（カットインのときはしない）
+    const swapIn = fadeIn && prev.overlap_beats > 0;
+    const swapOut = fadeOut && next.overlap_beats > 0;
+    if (swapIn) hpEvents.push([(fadeIn.mixFrom + fadeIn.mixTo) / 2, HP_OFF]);
+    if (swapOut) hpEvents.push([(fadeOut.mixFrom + fadeOut.mixTo) / 2, HP_ON]);
     const hpAt = (m) => {
-      if (fadeIn && m < (fadeIn.mixFrom + fadeIn.mixTo) / 2) return HP_ON;
-      if (fadeOut && m >= (fadeOut.mixFrom + fadeOut.mixTo) / 2) return HP_ON;
+      if (swapIn && m < (fadeIn.mixFrom + fadeIn.mixTo) / 2) return HP_ON;
+      if (swapOut && m >= (fadeOut.mixFrom + fadeOut.mixTo) / 2) return HP_ON;
       return HP_OFF;
     };
     segs.push({

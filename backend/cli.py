@@ -133,7 +133,8 @@ def cmd_sheet_pick(a):
 
 def cmd_plan(a):
     from .mixplan import build_plan, describe, save_plan
-    plan = build_plan(a.songs, min_sec=a.min_sec, use_sheet=not a.no_sheet, chorus_grace=a.chorus_grace)
+    plan = build_plan(a.songs, min_sec=a.min_sec, use_sheet=not a.no_sheet, chorus_grace=a.chorus_grace,
+                      styles=a.styles.split(",") if a.styles else None)
     print(describe(plan))
     if a.out:
         save_plan(plan, a.out)
@@ -220,6 +221,7 @@ def main(argv=None):
     s.add_argument("--min-sec", type=float, default=90.0, help="1曲を流す最低秒数（既定90）")
     s.add_argument("--chorus-grace", type=float, default=15.0, help="サビ終わりで出るときは最低秒数をこれだけ短くしてよい（既定15）")
     s.add_argument("--no-sheet", action="store_true", help="シートの構成・つなぎメモを使わず自動解析だけで決める")
+    s.add_argument("--styles", help="つなぎ方をつなぎ目の順にカンマ区切りで（auto/fade/cut 例: fade,cut）")
     s.add_argument("-o", "--out", help="計画を JSON で保存")
     s.add_argument("--render", metavar="MIX.mp3", help="そのままミックスを書き出す")
     s.set_defaults(fn=cmd_plan)

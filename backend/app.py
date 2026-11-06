@@ -7,18 +7,44 @@ API（UI を差し替えてもこのまま使える）
   GET  /api/tracks/<id>         1曲の詳細（区間・小節頭・キー候補）
   GET  /api/audio/<id>          mp3 そのもの（Range対応。ブラウザが必要な部分だけ取りに来る）
   GET  /api/routes              シートの「ルート曲→中間曲→曲名」とつなぎメモ
-  POST /api/plan                {"songs": [id or 曲名...], "min_sec": 90} → 再生計画
+  GET  /api/tracks/<id>/wave    波形（ピーク値の列。初回だけ計算して保存）
+  GET  /api/jacket/<id>         ジャケット画像（data/jackets/曲名.jpg があればそれ、なければ動画のサムネイル）
+  POST /api/plan                {"songs": [id or 曲名...], "min_sec": 90, "chorus_grace": 15,
+                                 "styles": ["fade", "cut", ...]} → 再生計画
   POST /api/tracks/<id>/analyze 解析を（再）実行
 """
+import json
+import re
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_file
+from flask import Flask, abort, jsonify, redirect, request, send_file
+
+from .config import ANALYSIS_DIR, DATA_DIR
 
 from .db import connect
 from .library import load_analysis, analyze_track
 from .mixplan import build_plan, AUTO_ROLE, ROLE_JA
 
 STATIC = Path(__file__).resolve().parent / "static"
+JACKET_DIR = DATA_DIR / "jackets"   # ここに「曲名.jpg」を置くとジャケットとして使う
+IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def _video_id(row):
+    sid = row["source_id"] or ""
+    return sid[3:] if sid.startswith("yt:") else None
+
+
+def _jacket_file(title):
+    if not title:
+        return None
+    safe = re.sub(r'[\\/:*?"<>|]', "_", title)
+    for name in {title, safe}:
+        for ext in IMG_EXT:
+            p = JACKET_DIR / f"{name}{ext}"
+            if p.exists():
+                return p
+    return None
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 
 
@@ -47,6 +73,12 @@ def index():
     return send_file(STATIC / "index.html")
 
 
+@app.get("/classic")
+def classic():
+    """以前の仮UI（区間の確認・デバッグ用）"""
+    return send_file(STATIC / "classic.html")
+
+
 @app.get("/api/tracks")
 def tracks():
     con = connect()
@@ -58,6 +90,10 @@ def tracks():
                     "bpm": r["bpm"], "key": r["key_name"], "camelot": r["camelot"],
                     "duration": r["duration"], "analyzed": r["analyzed_at"] is not None,
                     "has_sheet_structure": r["title"] in structure,
+                    "artist": r["artist"], "video_id": _video_id(r),
+                    "jacket": f"/api/jacket/{r['id']}" if (_jacket_file(r["title"]) or _video_id(r)) else None,
+                    # video = 動画のサムネイル（16:9 の上下に黒帯があるので画面側で拡大して切り取る）
+                    "jacket_kind": "file" if _jacket_file(r["title"]) else ("video" if _video_id(r) else None),
                     "file_exists": Path(r["file_path"]).exists()})
     return jsonify(out)
 
@@ -89,6 +125,49 @@ def audio(tid):
     return send_file(r["file_path"], conditional=True)
 
 
+@app.get("/api/jacket/<int:tid>")
+def jacket(tid):
+    r = connect().execute("SELECT * FROM tracks WHERE id=?", (tid,)).fetchone()
+    if r is None:
+        abort(404)
+    p = _jacket_file(r["title"])
+    if p:
+        return send_file(p, max_age=3600)
+    vid = _video_id(r)
+    if vid:
+        return redirect(f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg")
+    abort(404)
+
+
+def wave_peaks(path, n=600, sr=4000):
+    """mp3 全体を n 個の区間に分け、各区間の最大振幅（0〜1）を返す"""
+    import librosa
+    import numpy as np
+    y, _ = librosa.load(str(path), sr=sr, mono=True)
+    if len(y) == 0:
+        return []
+    edges = np.linspace(0, len(y), n + 1).astype(int)
+    peaks = np.array([np.abs(y[a:b]).max() if b > a else 0.0 for a, b in zip(edges[:-1], edges[1:])])
+    peaks = peaks / (peaks.max() + 1e-9)
+    return [round(float(x), 3) for x in peaks]
+
+
+@app.get("/api/tracks/<int:tid>/wave")
+def wave(tid):
+    r = connect().execute("SELECT file_path FROM tracks WHERE id=?", (tid,)).fetchone()
+    if r is None or not Path(r["file_path"]).exists():
+        abort(404)
+    f = Path(r["file_path"])
+    cache = ANALYSIS_DIR / f"{tid}.wave.json"
+    if cache.exists():
+        c = json.loads(cache.read_text())
+        if c.get("mtime") == f.stat().st_mtime:
+            return jsonify(c)
+    c = {"mtime": f.stat().st_mtime, "peaks": wave_peaks(f)}
+    cache.write_text(json.dumps(c))
+    return jsonify(c)
+
+
 @app.get("/api/routes")
 def routes():
     con = connect()
@@ -109,7 +188,8 @@ def plan():
     if len(songs) < 2:
         return jsonify({"error": "2曲以上選んでください"}), 400
     try:
-        p = build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True))
+        p = build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
+                       chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"))
     except (KeyError, RuntimeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     for it in p["items"]:
