@@ -105,7 +105,8 @@ def render(plan, out_path, gain_db=-1.0):
             # 入る曲: in の手前 overlap_beats 拍（入る曲のテンポで）を読み、出る曲のテンポに伸縮
             beats = nxt["overlap_beats"]
             L_b = beats * 60.0 / b["bpm"]
-            b_head = _load(b["file"], max(0.0, nxt["in"] - L_b), L_b)
+            # in が曲の頭に近いときは、足りない分を無音で埋める（in より後の音を二重に鳴らさない）
+            b_head = _load(b["file"], nxt["in"] - L_b, L_b)
             if nxt["tempo_gap"] <= 0.06:
                 b_head = _stretch(b_head, rate=(b_head.shape[1] / SR) / L_out)
             b_head = _fit(b_head, n)

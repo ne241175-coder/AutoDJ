@@ -18,6 +18,8 @@ API（UI を差し替えてもこのまま使える）
   POST /api/feedback            ミックスを聞いた人の評価 {"songs": [...], "links": [{"chosen": 特徴, "rating": "good"|"bad",
                                  "better": 特徴|null, "others": [特徴...]}]} → data/feedback.jsonl に保存し、重みを学び直す
   GET  /api/feedback            評価の件数と、いま使っている重み（手で決めた値 or 学習した値）
+  POST /api/render              /api/plan と同じ指定で、できたミックスを mp3 に書き出してダウンロード
+                                 （同じ指定なら data/cache/mix/ に作ったものを使い回す）
 """
 import json
 import re
@@ -205,17 +207,21 @@ def routes():
     return jsonify(out)
 
 
+def _plan_from(body):
+    songs = body.get("songs") or []
+    if len(songs) < 2:
+        raise ValueError("2曲以上選んでください")
+    return build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
+                      chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"),
+                      links=body.get("links"), match_bpm=body.get("match_bpm", True),
+                      match_key=body.get("match_key", True))
+
+
 @app.post("/api/plan")
 def plan():
     body = request.get_json(force=True)
-    songs = body.get("songs") or []
-    if len(songs) < 2:
-        return jsonify({"error": "2曲以上選んでください"}), 400
     try:
-        p = build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
-                       chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"),
-                       links=body.get("links"), match_bpm=body.get("match_bpm", True),
-                       match_key=body.get("match_key", True))
+        p = _plan_from(body)
     except (KeyError, RuntimeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     for it in p["items"]:
@@ -223,6 +229,38 @@ def plan():
         it["audio_url"] = f"/api/audio/{it['track_id']}{q}"
         it.pop("file", None)
     return jsonify(p)
+
+
+MIX_DIR = DATA_DIR / "cache" / "mix"
+
+
+@app.post("/api/render")
+def render_mix():
+    """画面で聞いたのと同じミックスを mp3 にする（つなぎ位置・繋ぎ方・BPM/キー合わせもそのまま）"""
+    import hashlib
+    from .render import render
+    body = request.get_json(force=True) or {}
+    try:
+        p = _plan_from(body)
+    except (KeyError, RuntimeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    # 同じ計画なら作り直さない（計画の中身と、使う音源の更新時刻から名前を決める）
+    sig = json.dumps({"items": [[it["file"], it["start"], it["end"], it.get("rate"), it.get("semitones")] for it in p["items"]],
+                      "trans": [[t["out"], t["in"], t.get("overlap_beats"), t.get("style")] for t in p["transitions"]],
+                      "mtime": [Path(it["file"]).stat().st_mtime if Path(it["file"]).exists() else 0 for it in p["items"]]},
+                     sort_keys=True)
+    MIX_DIR.mkdir(parents=True, exist_ok=True)
+    out = MIX_DIR / f"{hashlib.sha1(sig.encode()).hexdigest()[:16]}.mp3"
+    if not out.exists():
+        try:
+            made, cue = render(p, out)
+        except (OSError, RuntimeError, ValueError) as e:
+            return jsonify({"error": f"書き出せませんでした: {e}"}), 500
+        if made != out:      # ffmpeg が無いときは wav になる
+            out = made
+    name = "AutoDJ_" + "_".join(re.sub(r'[\\/:*?"<>|\s]+', "", it["title"])[:20] for it in p["items"]) + out.suffix
+    return send_file(out, as_attachment=True, download_name=name,
+                     mimetype="audio/mpeg" if out.suffix == ".mp3" else "audio/wav")
 
 
 @app.post("/api/feedback")

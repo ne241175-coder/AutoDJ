@@ -630,7 +630,9 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     </div>
     <button class="back" style=${{ left: 40, top: 772 }} onClick=${onBack}>◀ 曲を選び直す</button>
     <button class="next" style=${{ left: 1060, top: 760 }} disabled=${!plan || busy}
-      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan, { picks: picksForFeedback(), auto, songs: selected }); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
+      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan, { picks: picksForFeedback(), auto, songs: selected,
+        req: { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links,
+               match_bpm: match.bpm, match_key: match.key } }); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
   </div>`;
 }
 
@@ -669,10 +671,34 @@ function RingViz({ player, color }) {
   return html`<canvas ref=${ref} class="ringviz"></canvas>`;
 }
 
+// ---------------------------------------------------------------- できたミックスを mp3 で保存
+// 画面で聞いたのと同じ指定（曲・つなぎ位置・繋ぎ方・BPM/キー合わせ）をサーバに送り、書き出した mp3 を受け取る
+function useMp3Download(req, onError) {
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!req || busy) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+      const cd = r.headers.get("Content-Disposition") || "";
+      const m = cd.match(/filename\*=UTF-8''([^;]+)/i) || cd.match(/filename="?([^";]+)"?/i);
+      const name = m ? decodeURIComponent(m[1]) : "AutoDJ_mix.mp3";
+      const url = URL.createObjectURL(await r.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = name; document.body.appendChild(a); a.click();
+      setTimeout(() => a.remove(), 1000);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { onError && onError(`mp3 を書き出せませんでした: ${e.message}`); }
+    setBusy(false);
+  };
+  return [save, busy];
+}
+
 // ---------------------------------------------------------------- 再生後の評価（つなぎ目ごと）
 // 「良い／微妙」と、微妙なら「こっちの方が良さそう」を選んでもらい、/api/feedback へ送る。
 // サーバはそれを貯めて、つなぎ目の点数の重みを学び直す（backend/linkmodel.py）。
-function RatePanel({ plan, player, meta, onClose }) {
+function RatePanel({ plan, player, meta, onClose, onSave, saving }) {
   const [r, setR] = useState({});        // k → { rating, better }
   const [sent, setSent] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -722,12 +748,14 @@ function RatePanel({ plan, player, meta, onClose }) {
         : html`<span class="ok">ありがとう！ ${sent.model.source === "learned"
             ? `評価 ${sent.model.n_feedback}回分から重みを学び直しました` : `評価 ${sent.model.n_feedback}回分（もう少し集まると学習します）`}</span>`)
         : html`<button class="send" disabled=${busy || n === 0} onClick=${submit}>${busy ? "送信中…" : "評価を送る"}</button>`}
+      ${onSave && html`<button class="mini" disabled=${saving} onClick=${onSave}>${saving ? "書き出し中…" : "⬇ MP3で保存"}</button>`}
       <button class="mini" onClick=${onClose}>${sent ? "閉じる" : "あとで"}</button>
     </div>
   </div>`;
 }
 
-function PlayScreen({ tracks, plan, player, meta, onBack }) {
+function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
+  const [saveMp3, saving] = useMp3Download(meta && meta.req, onError);
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const [now, setNow] = useState(0);
   const [playing, setPlaying] = useState(player.playing);
@@ -769,6 +797,8 @@ function PlayScreen({ tracks, plan, player, meta, onBack }) {
   return html`<div class="screen">
     <button class="back" style=${{ left: 36, top: 20 }} onClick=${onBack}>◀ 繋ぎ方へ</button>
     <button class="back" style=${{ left: 1110, top: 20 }} onClick=${() => setRating(true)}>★ 評価する</button>
+    ${meta && meta.req && html`<button class="back" style=${{ left: 940, top: 20 }} disabled=${saving} onClick=${saveMp3}
+      title="このミックスを1つの mp3 ファイルとして保存">${saving ? "書き出し中…" : "⬇ MP3で保存"}</button>`}
     <div class="queue">
       ${plan.items.map((x, i) => html`<div key=${i} class=${`q click${i === index ? " on" : ""}`} onClick=${() => seekSong(i)}>
         <${Jacket} track=${byId.get(x.track_id)} size=${56} style=${{ boxShadow: i === index ? `0 0 0 3px ${PICK[i % PICK.length]}` : null }} />
@@ -809,7 +839,8 @@ function PlayScreen({ tracks, plan, player, meta, onBack }) {
     <div class="timeline"><${Wave} peaks=${mixPeaks} width=${1200} height=${34} duration=${layout.total} colorAt=${mixColorAt(layout)}
       progress=${now} onSeek=${(t) => player.play(t)}
       markers=${layout.transitionsMix.map((t, k) => ({ t, color: STYLE[plan.transitions[k].style || "auto"].color }))} /></div>
-    ${rating && html`<${RatePanel} plan=${plan} player=${player} meta=${meta || {}} onClose=${() => setRating(false)} />`}
+    ${rating && html`<${RatePanel} plan=${plan} player=${player} meta=${meta || {}} onClose=${() => setRating(false)}
+      onSave=${meta && meta.req ? saveMp3 : null} saving=${saving} />`}
   </div>`;
 }
 
@@ -885,7 +916,7 @@ function App() {
     styles=${styles} setStyles=${setStyles} minSec=${minSec} setMinSec=${setMinSec} auto=${auto} setAuto=${setAuto}
     match=${match} setMatch=${setMatch}
     onError=${setErr} onBack=${() => { setPicks(picks.slice(0, 2)); setScreen("select"); }} onStart=${start} />`;
-  else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player} meta=${meta}
+  else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player} meta=${meta} onError=${setErr}
     onBack=${() => { player.stop(); setScreen("connect"); }} />`;
 
   return html`<div class="viewport"><div class="stage" style=${{ transform: `translate(-50%, -50%) scale(${scale})` }}>
