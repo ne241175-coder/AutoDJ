@@ -137,13 +137,11 @@ def entry_points(song, with_order=False):
     return out if with_order else [(t, r) for t, r, _ in out]
 
 
-# 「つながりそうか」の点数の重み（合計 1.0 ＋ 区間の種類による小さな好み）
-W_TEMPO, W_KEY, W_ENERGY, W_CONF = 0.30, 0.30, 0.25, 0.15
-# 区間の種類の好み（小さめ。どこでもつないでよいが、同点ならサビ終わり・サビ頭／曲頭）
-ROLE_PRIOR_OUT = {"chorus": 0.08, "outro": 0.02}
-ROLE_PRIOR_IN = {"chorus": 0.06, "start": 0.06, "verse": 0.03}
-# 入る曲の2回目以降の区間に入るのは、残りが短くなるので少し不利
-LATER_ENTRY_PENALTY = 0.05
+# 「つながりそうか」の点数 = 手がかり × 重み の合計（linkmodel.py）。
+# 重みは最初は手で決めた値（テンポ0.30・キー0.30・勢い0.25・確かさ0.15 ＋ 区間の種類の小さな好み）で、
+# 人の評価が貯まると data/link_model.json の学習した重みに置き換わる。
+from .linkmodel import DEFAULT_WEIGHTS, current_weights, model_info
+W_TEMPO, W_KEY, W_ENERGY, W_CONF = (DEFAULT_WEIGHTS[k] for k in ("tempo", "key", "energy", "conf"))
 LENGTH_PENALTY = 0.002   # 最低秒数より長く流すほど少し減点（同じ条件なら早めに次へ）
 DEFAULT_CHORUS_GRACE = 15.0   # サビ終わりで出るときは、最低秒数をこれだけ短くしてよい
 
@@ -180,28 +178,58 @@ class Link:
     reasons: list = field(default_factory=list)
     manual: bool = False
     out_role: str = "chorus"
+    features: dict = field(default_factory=dict)
 
 
-def candidate_links(a: Song, b: Song, manual=None):
+def link_features(a: Song, b: Song, out, inn, out_role, in_role, nth=1):
+    """つなぎ目1つの手がかり（linkmodel.FEATURES）。点数はこれと重みの掛け算の合計"""
+    ef, _, _ = energy_fit(a, b, out, inn)
+    ci = 1.0 if in_role == "start" else section_conf(b, inn, "start")
+    co = section_conf(a, out, "end")
+    return {"tempo": round(tempo_score(a.bpm, b.bpm), 4), "key": key_score(a.camelot, b.camelot),
+            "energy": round(ef, 4), "conf": round((co + ci) / 2, 4),
+            "out_chorus": float(out_role == "chorus"), "out_outro": float(out_role == "outro"),
+            "in_chorus": float(in_role == "chorus"), "in_start": float(in_role == "start"),
+            "in_verse": float(in_role == "verse"), "later_entry": float(nth > 1)}
+
+
+def features_at(a: Song, b: Song, out, inn):
+    """任意の位置（シートのメモ・選び直した位置など）の手がかり。区間の種類は近い区切りから推定"""
+    out, inn = a.snap(out), b.snap(inn)
+    io, ii = _section_at(a, out, "end"), _section_at(b, inn, "start")
+    ro = a.sections[io]["role"] if io is not None else "other"
+    first = b.sections[0]["start"] if b.sections else 0.0
+    if abs(inn - b.snap(first)) <= 2.0:
+        ri, nth = "start", 1
+    elif ii is not None:
+        ri = b.sections[ii]["role"]
+        nth = sum(1 for x in b.sections[:ii + 1] if x["role"] == ri)
+    else:
+        ri, nth = "other", 1
+    return link_features(a, b, out, inn, ro, ri, nth)
+
+
+def candidate_links(a: Song, b: Song, manual=None, weights=None):
     """つなぎ候補: 出る曲のどの区間の終わり × 入る曲のどの区間の頭 でもよい。
-    点数 = テンポの近さ・キーの相性・音の大きさのつながり・区切りの確かさ ＋ 区間の種類の小さな好み"""
-    ts, ks = tempo_score(a.bpm, b.bpm), key_score(a.camelot, b.camelot)
-    base = W_TEMPO * ts + W_KEY * ks
+    点数 = テンポの近さ・キーの相性・音の大きさのつながり・区切りの確かさ ＋ 区間の種類の小さな好み
+    （それぞれの重みは linkmodel。人の評価から学習した重みがあればそれを使う）"""
+    w = weights or current_weights()
+
+    def sc(f):
+        return sum(w[k] * f[k] for k in f)
+
     why = [f"BPM {a.bpm:.0f}→{b.bpm:.0f}", f"Key {a.camelot}→{b.camelot}"]
     links = []
     for xo, ko in exit_points(a):
-        co = section_conf(a, xo, "end")
         for xi, ki, nth in entry_points(b, with_order=True):
-            ef, _, _ = energy_fit(a, b, xo, xi)
-            ci = 1.0 if ki == "start" else section_conf(b, xi, "start")
-            sc = (base + W_ENERGY * ef + W_CONF * (co + ci) / 2
-                  + ROLE_PRIOR_OUT.get(ko, 0.0) + ROLE_PRIOR_IN.get(ki, 0.0)
-                  - (LATER_ENTRY_PENALTY if nth > 1 else 0.0))
+            f = link_features(a, b, xo, xi, ko, ki, nth)
             kin = "曲の頭" if ki == "start" else ROLE_JA.get(ki, ki) + "頭"
-            links.append(Link(xo, xi, sc, f"{ROLE_JA.get(ko, ko)}終わり→{kin}", why, out_role=ko))
+            links.append(Link(xo, xi, sc(f), f"{ROLE_JA.get(ko, ko)}終わり→{kin}", why, out_role=ko, features=f))
     if manual:
+        f = features_at(a, b, manual["out"], manual["in"])
+        base = w["tempo"] * f["tempo"] + w["key"] * f["key"]
         links.append(Link(a.snap(manual["out"]), b.snap(manual["in"]), base + 2.0, manual.get("kind", "シートのつなぎメモ"),
-                          why + [manual.get("why", "手動指定")], manual=True))
+                          why + [manual.get("why", "手動指定")], manual=True, features=f))
     return links
 
 
@@ -278,12 +306,13 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=D
         next_out = chosen[i + 1].out if i + 1 < len(chosen) else None
         transitions.append({"from": i, "to": i + 1, "out": round(l.out, 3), "in": round(l.inn, 3),
                             "kind": l.kind, "score": round(l.score, 3), "reasons": l.reasons,
-                            "manual": l.manual, "tempo_gap": round(gap, 3),
+                            "manual": l.manual, "tempo_gap": round(gap, 3), "features": l.features,
                             # テンポが近ければ1小節かけて混ぜる、遠ければ1拍で切り替える
                             "overlap_beats": 4 if gap <= 0.06 else 1,
                             "explain": explain_link(a, b, l),
                             "alternatives": alternatives(cands[i], l, prev_in, next_out, min_sec, chorus_grace, a, b)})
-    return {"min_sec": min_sec, "chorus_grace": chorus_grace, "items": items, "transitions": transitions, "warnings": warnings}
+    return {"min_sec": min_sec, "chorus_grace": chorus_grace, "items": items, "transitions": transitions,
+            "warnings": warnings, "model": model_info()}
 
 
 def _section_at(song, t, edge):
@@ -341,7 +370,7 @@ def alternatives(cands, chosen, prev_in, next_out, min_sec, chorus_grace, a, b, 
             continue
         seen.add(key)
         out.append({"out": round(l.out, 3), "in": round(l.inn, 3), "kind": l.kind, "score": round(l.score, 3),
-                    "manual": l.manual})
+                    "manual": l.manual, "features": l.features})
         if len(out) >= n:
             break
     return out

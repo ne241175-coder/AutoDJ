@@ -15,6 +15,9 @@ API（UI を差し替えてもこのまま使える）
                                  "match_bpm": true, "match_key": true（入る曲を出る曲に合わせる）} → 再生計画
                                  transitions[].explain（なぜここか）/ alternatives（ほかの候補）/ human（シートのメモ）
   POST /api/tracks/<id>/analyze 解析を（再）実行
+  POST /api/feedback            ミックスを聞いた人の評価 {"songs": [...], "links": [{"chosen": 特徴, "rating": "good"|"bad",
+                                 "better": 特徴|null, "others": [特徴...]}]} → data/feedback.jsonl に保存し、重みを学び直す
+  GET  /api/feedback            評価の件数と、いま使っている重み（手で決めた値 or 学習した値）
 """
 import json
 import re
@@ -27,6 +30,7 @@ from .config import ANALYSIS_DIR, DATA_DIR
 from .db import connect
 from .library import load_analysis, analyze_track
 from .mixplan import build_plan, AUTO_ROLE, ROLE_JA
+from . import linkmodel
 
 STATIC = Path(__file__).resolve().parent / "static"
 JACKET_DIR = DATA_DIR / "jackets"   # ここに「曲名.jpg」を置くとジャケットとして使う
@@ -219,6 +223,31 @@ def plan():
         it["audio_url"] = f"/api/audio/{it['track_id']}{q}"
         it.pop("file", None)
     return jsonify(p)
+
+
+@app.post("/api/feedback")
+def feedback():
+    body = request.get_json(force=True) or {}
+    links = [l for l in (body.get("links") or []) if isinstance(l, dict) and l.get("chosen")]
+    if not links:
+        return jsonify({"error": "評価がありません"}), 400
+    allowed = set(linkmodel.FEATURES)
+    clean = lambda f: {k: float(v) for k, v in (f or {}).items() if k in allowed} if f else None   # noqa: E731
+    entry = {"songs": body.get("songs") or [], "auto": bool(body.get("auto", True)), "source": body.get("source", "ui"),
+             "links": [{"k": l.get("k"), "rating": l.get("rating") if l.get("rating") in ("good", "bad") else None,
+                        "chosen": clean(l["chosen"]), "better": clean(l.get("better")),
+                        "others": [clean(o) for o in (l.get("others") or [])[:6] if o],
+                        "kind": l.get("kind"), "better_kind": l.get("better_kind")} for l in links]}
+    linkmodel.record(entry)
+    res = linkmodel.learn() if app.config.get("AUTO_LEARN", True) else {"saved": False}
+    return jsonify({"ok": True, "learned": res.get("saved", False), "model": linkmodel.model_info(),
+                    "message": res.get("message")})
+
+
+@app.get("/api/feedback")
+def feedback_summary():
+    return jsonify({"model": linkmodel.model_info(), "weights": linkmodel.current_weights(),
+                    "default": linkmodel.DEFAULT_WEIGHTS, "labels": linkmodel.FEATURE_JA})
 
 
 @app.post("/api/tracks/<int:tid>/analyze")

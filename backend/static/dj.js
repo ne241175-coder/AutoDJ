@@ -493,8 +493,18 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
   const [hover, setHover] = useState(null);
   const previewer = useRef(null);
   const hoverTimer = useRef(null);
+  const autoPick = useRef({});                  // 選び直す前の、自動で選ばれたつなぎ目（評価の材料）
 
-  useEffect(() => setLinks({}), [selected.join(","), auto]);
+  useEffect(() => { setLinks({}); autoPick.current = {}; }, [selected.join(","), auto]);
+  useEffect(() => {
+    if (!base) return;
+    base.transitions.forEach((t, k) => { if (!links[k]) autoPick.current[k] = { features: t.features, kind: t.kind }; });
+  }, [base]);
+  // 画面で候補を選び直した = 「自動の1位より、こっちが良い」という評価として送る
+  const picksForFeedback = () => Object.keys(links).map((k) => {
+    const a = autoPick.current[k], t = plan && plan.transitions[k];
+    return a && t && a.features && t.features ? { k: +k, chosen: a.features, kind: a.kind, better: t.features, better_kind: t.kind } : null;
+  }).filter(Boolean);
   useEffect(() => {
     let alive = true;
     setBusy(true);
@@ -559,6 +569,8 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
 
   return html`<div class="screen" onClick=${() => { setOpen(null); }}>
     <div class="h1" style=${{ left: 55, top: 22, fontSize: 38 }}>繋ぎ方を選んでね</div>
+    ${plan && plan.model && html`<div class="modelnote">点数の重み：${plan.model.source === "learned"
+      ? html`<b>評価から学習</b>（${plan.model.n_feedback}回分）` : `手で決めた値${plan.model.n_feedback ? `（評価 ${plan.model.n_feedback}回分）` : ""}`}</div>`}
     <div class="modes" onClick=${(e) => e.stopPropagation()}>
       <button class=${auto ? "on" : ""} onClick=${() => setAuto(true)}>自動検知</button>
       <button class=${!auto ? "on" : ""} onClick=${() => setAuto(false)}>シートの手入力</button>
@@ -618,7 +630,7 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     </div>
     <button class="back" style=${{ left: 40, top: 772 }} onClick=${onBack}>◀ 曲を選び直す</button>
     <button class="next" style=${{ left: 1060, top: 760 }} disabled=${!plan || busy}
-      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
+      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan, { picks: picksForFeedback(), auto, songs: selected }); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
   </div>`;
 }
 
@@ -657,7 +669,65 @@ function RingViz({ player, color }) {
   return html`<canvas ref=${ref} class="ringviz"></canvas>`;
 }
 
-function PlayScreen({ tracks, plan, player, onBack }) {
+// ---------------------------------------------------------------- 再生後の評価（つなぎ目ごと）
+// 「良い／微妙」と、微妙なら「こっちの方が良さそう」を選んでもらい、/api/feedback へ送る。
+// サーバはそれを貯めて、つなぎ目の点数の重みを学び直す（backend/linkmodel.py）。
+function RatePanel({ plan, player, meta, onClose }) {
+  const [r, setR] = useState({});        // k → { rating, better }
+  const [sent, setSent] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const layout = player.layout;
+  const set = (k, v) => setR({ ...r, [k]: { ...(r[k] || {}), ...v } });
+  const listen = (k) => player.play(Math.max(0, layout.transitionsMix[k] - 8));
+  const n = Object.values(r).filter((x) => x.rating).length + (meta.picks || []).length;
+  const submit = async () => {
+    setBusy(true);
+    const links = plan.transitions.map((t, k) => {
+      const x = r[k] || {};
+      if (!x.rating) return null;
+      const alts = (t.alternatives || []).filter((c) => c.features);
+      const b = x.better != null ? alts[x.better] : null;
+      return { k, rating: x.rating, chosen: t.features, kind: t.kind, others: alts.slice(0, 4).map((c) => c.features),
+               better: b ? b.features : null, better_kind: b ? b.kind : null };
+    }).filter(Boolean).concat(meta.picks || []);
+    try {
+      const res = await post("/api/feedback", { songs: meta.songs, auto: meta.auto, links });
+      setSent(res);
+    } catch (e) { setSent({ error: e.message }); }
+    setBusy(false);
+  };
+  return html`<div class="rate" onClick=${(e) => e.stopPropagation()}>
+    <h3>つなぎ目はどうだった？</h3>
+    <div class="rate-sub">評価すると、次から点数のつけ方（重み）が少しずつ学習されます</div>
+    ${plan.transitions.map((t, k) => {
+      const x = r[k] || {};
+      const alts = (t.alternatives || []).filter((c) => c.features).slice(0, 3);
+      return html`<div key=${k} class="rate-row">
+        <div class="rate-t"><b style=${{ color: PICK[k] }}>${plan.items[k].title}</b> → <b style=${{ color: PICK[k + 1] }}>${plan.items[k + 1].title}</b>
+          <span>${t.kind}（${fmt(t.out)} → ${fmt(t.in)}）</span></div>
+        <div class="rate-b">
+          <button class="mini" onClick=${() => listen(k)}>▶ もう一度聞く</button>
+          <button class=${`rb good${x.rating === "good" ? " on" : ""}`} onClick=${() => set(k, { rating: "good", better: null })}>良い</button>
+          <button class=${`rb bad${x.rating === "bad" ? " on" : ""}`} onClick=${() => set(k, { rating: "bad" })}>微妙</button>
+        </div>
+        ${x.rating === "bad" && alts.length > 0 && html`<div class="rate-alt"><span>こっちの方が良さそう？（任意）</span>
+          ${alts.map((c, i) => html`<button key=${i} class=${`alt${x.better === i ? " on" : ""}`}
+            onClick=${() => set(k, { better: x.better === i ? null : i })}><span>${c.kind}</span><b>${fmt(c.out)} → ${fmt(c.in)}</b><em></em></button>`)}
+        </div>`}
+      </div>`;
+    })}
+    ${(meta.picks || []).length > 0 && html`<div class="rate-sub">画面で選び直した候補 ${meta.picks.length} 件も「こっちが良い」として送ります</div>`}
+    <div class="rate-foot">
+      ${sent ? (sent.error ? html`<span class="ng">送れませんでした: ${sent.error}</span>`
+        : html`<span class="ok">ありがとう！ ${sent.model.source === "learned"
+            ? `評価 ${sent.model.n_feedback}回分から重みを学び直しました` : `評価 ${sent.model.n_feedback}回分（もう少し集まると学習します）`}</span>`)
+        : html`<button class="send" disabled=${busy || n === 0} onClick=${submit}>${busy ? "送信中…" : "評価を送る"}</button>`}
+      <button class="mini" onClick=${onClose}>${sent ? "閉じる" : "あとで"}</button>
+    </div>
+  </div>`;
+}
+
+function PlayScreen({ tracks, plan, player, meta, onBack }) {
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const [now, setNow] = useState(0);
   const [playing, setPlaying] = useState(player.playing);
@@ -672,6 +742,9 @@ function PlayScreen({ tracks, plan, player, onBack }) {
   // つなぎ目の前後は、どこでつないでいるかを表示する
   const nearK = layout.transitionsMix.findIndex((t) => now >= t - 10 && now <= t + 5);
   const nearT = nearK >= 0 ? plan.transitions[nearK] : null;
+  const [rating, setRating] = useState(false);
+  const [asked, setAsked] = useState(false);
+  useEffect(() => { if (ended && !asked) { setRating(true); setAsked(true); } }, [ended]);
 
   const toggle = () => (player.playing ? player.stop() : player.play(ended ? 0 : player.now()));
   const skip = () => { if (nextT != null) player.play(Math.max(player.now(), nextT - 10)); };
@@ -695,6 +768,7 @@ function PlayScreen({ tracks, plan, player, onBack }) {
 
   return html`<div class="screen">
     <button class="back" style=${{ left: 36, top: 20 }} onClick=${onBack}>◀ 繋ぎ方へ</button>
+    <button class="back" style=${{ left: 1110, top: 20 }} onClick=${() => setRating(true)}>★ 評価する</button>
     <div class="queue">
       ${plan.items.map((x, i) => html`<div key=${i} class=${`q click${i === index ? " on" : ""}`} onClick=${() => seekSong(i)}>
         <${Jacket} track=${byId.get(x.track_id)} size=${56} style=${{ boxShadow: i === index ? `0 0 0 3px ${PICK[i % PICK.length]}` : null }} />
@@ -735,6 +809,7 @@ function PlayScreen({ tracks, plan, player, onBack }) {
     <div class="timeline"><${Wave} peaks=${mixPeaks} width=${1200} height=${34} duration=${layout.total} colorAt=${mixColorAt(layout)}
       progress=${now} onSeek=${(t) => player.play(t)}
       markers=${layout.transitionsMix.map((t, k) => ({ t, color: STYLE[plan.transitions[k].style || "auto"].color }))} /></div>
+    ${rating && html`<${RatePanel} plan=${plan} player=${player} meta=${meta || {}} onClose=${() => setRating(false)} />`}
   </div>`;
 }
 
@@ -751,6 +826,7 @@ function App() {
   const [match, setMatch] = useState({ bpm: true, key: true });   // BPM・キーを合わせる
   const [player, setPlayer] = useState(null);
   const [plan, setPlan] = useState(null);
+  const [meta, setMeta] = useState(null);       // 評価に添える情報（曲・選び直した候補）
   const [load, setLoad] = useState(null);
   const [err, setErr] = useState(null);
 
@@ -777,7 +853,8 @@ function App() {
     return titles.map((x) => byTitle.get(x) || { id: `missing:${x}`, title: x, analyzed: false, file_exists: false });
   }, [routes, picks, byTitle]);
 
-  const start = async (p) => {
+  const start = async (p, m) => {
+    setMeta(m || null);
     audioContext().resume();   // クリックした瞬間に音を出せる状態にする（ブラウザの制限）
     if (player) player.stop();
     const pl = new MixPlayer(p);
@@ -808,7 +885,7 @@ function App() {
     styles=${styles} setStyles=${setStyles} minSec=${minSec} setMinSec=${setMinSec} auto=${auto} setAuto=${setAuto}
     match=${match} setMatch=${setMatch}
     onError=${setErr} onBack=${() => { setPicks(picks.slice(0, 2)); setScreen("select"); }} onStart=${start} />`;
-  else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player}
+  else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player} meta=${meta}
     onBack=${() => { player.stop(); setScreen("connect"); }} />`;
 
   return html`<div class="viewport"><div class="stage" style=${{ transform: `translate(-50%, -50%) scale(${scale})` }}>

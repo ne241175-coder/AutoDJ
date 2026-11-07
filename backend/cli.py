@@ -9,6 +9,8 @@
   python -m backend.cli tag ID -g "J-pop,Rock"                       ジャンル変更
   python -m backend.cli evaluate truth.json                          手付け正解と比較
   python -m backend.cli genres                                       使えるジャンル
+  python -m backend.cli feedback                                     集まった評価と、いまの重み
+  python -m backend.cli learn-links [--memos] [--reset]              評価から、つなぎ目の点数の重みを学習
 """
 import argparse
 import sys
@@ -166,6 +168,48 @@ def cmd_learn(a):
     learn(truth_json=a.truth, threshold=a.threshold, min_confidence=a.min_confidence)
 
 
+def cmd_feedback(a):
+    from . import linkmodel as lm
+    recs = lm.load_feedback()
+    n_links = sum(len(r.get("links", [])) for r in recs)
+    good = sum(1 for r in recs for l in r.get("links", []) if l.get("rating") == "good")
+    bad = sum(1 for r in recs for l in r.get("links", []) if l.get("rating") == "bad")
+    pick = sum(1 for r in recs for l in r.get("links", []) if l.get("better"))
+    print(f"評価 {len(recs)} 回分（つなぎ目 {n_links}: 良い {good} / 微妙 {bad} / 別の候補を選んだ {pick}）")
+    info = lm.model_info()
+    print(f"いまの重み: {'学習した値' if info['source'] == 'learned' else '手で決めた値'}")
+    if info["source"] == "learned":
+        m = lm.load_model()
+        print(lm.describe_weights(m["weights"]))
+        if m.get("accuracy"):
+            acc = m["accuracy"]
+            print(f"評価1回分ずつ外した答え合わせ: 学習 {acc['learned']:.0%} / 手で決めた値 {acc['default']:.0%}"
+                  f"（{acc['groups']} 回分）")
+
+
+def cmd_learn_links(a):
+    from . import linkmodel as lm
+    if a.reset:
+        if lm.MODEL_PATH.exists():
+            lm.MODEL_PATH.unlink()
+        print("学習した重みを消しました（手で決めた値に戻ります）")
+        return
+    extra = lm.memo_pairs() if a.memos else []
+    if a.memos:
+        print(f"シートのつなぎメモから {len(extra)} ペア")
+    r = lm.learn(extra_pairs=extra, min_pairs=a.min_pairs)
+    if not r["saved"]:
+        print(r["message"])
+        return
+    print(f"学習しました（ペア {r['n_pairs']}、評価 {r['n_feedback']} 回分）→ {lm.MODEL_PATH}")
+    print(lm.describe_weights(r["weights"]))
+    ta = r["train_agreement"]
+    print(f"学習に使ったペアでの一致率: 学習 {ta['learned']:.0%} / 手で決めた値 {ta['default']:.0%}")
+    if r.get("accuracy"):
+        acc = r["accuracy"]
+        print(f"1回分ずつ外した答え合わせ: 学習 {acc['learned']:.0%} / 手で決めた値 {acc['default']:.0%}（{acc['groups']} 回分）")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="autodj", description="AutoDJ（取り込み・解析）")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -251,6 +295,15 @@ def main(argv=None):
     s.add_argument("--min-confidence", type=float, default=0.0,
                    help="信頼度（正解の見込み）がこれ未満の区切りを捨てる。例 0.75（既定0 = 捨てない）")
     s.set_defaults(fn=cmd_learn)
+
+    s = sub.add_parser("feedback", help="集まった評価と、いま使っている重みを表示")
+    s.set_defaults(fn=cmd_feedback)
+
+    s = sub.add_parser("learn-links", help="評価から、つなぎ目の点数の重みを学習する")
+    s.add_argument("--memos", action="store_true", help="シートのつなぎメモもお手本に加える")
+    s.add_argument("--min-pairs", type=int, default=3)
+    s.add_argument("--reset", action="store_true", help="学習した重みを消して、手で決めた値に戻す")
+    s.set_defaults(fn=cmd_learn_links)
 
     s = sub.add_parser("genres", help="使えるジャンル一覧")
     s.set_defaults(fn=lambda a: print(", ".join(GENRES)))

@@ -131,3 +131,21 @@ def test_audio_fx_keeps_length(tmp_path):
     spec = np.abs(np.fft.rfft(y[int(osr * 0.5):int(osr * 2.5)] if y.ndim == 1 else y[int(osr * 0.5):int(osr * 2.5), 0]))
     f = np.argmax(spec) * osr / (2 * osr)
     assert abs(f - 440 * 2 ** (2 / 12)) < 8                      # 音程は +2半音
+
+
+def test_link_score_is_features_times_weights(songs):
+    """つなぎ候補の点数 = 手がかり × 重み。重みを変えると選ばれる候補も変わる"""
+    from backend import linkmodel as lm
+    from backend.mixplan import candidate_links
+    a, b = songs[0][0], songs[1][0]
+    cands = candidate_links(a, b, weights=lm.DEFAULT_WEIGHTS)
+    assert cands and all(set(c.features) == set(lm.FEATURES) for c in cands)
+    for c in cands:
+        assert c.score == pytest.approx(lm.score(c.features, lm.DEFAULT_WEIGHTS))
+    plan = plan_chain([s for s, _ in songs], min_sec=30)
+    t = plan["transitions"][0]
+    assert t["features"] and all("features" in x for x in t["alternatives"]) and plan["model"]["source"] in ("default", "learned")
+    # 「曲の頭から入る」を強く好む重みにすると、入る位置の点数の順位が変わる
+    w = dict(lm.DEFAULT_WEIGHTS, in_start=1.0)
+    best = max(candidate_links(a, b, weights=w), key=lambda c: c.score)
+    assert best.features["in_start"] == 1.0

@@ -201,6 +201,29 @@ input[type=text] { cursor: text; }
   padding: 8px 16px; border-radius: 8px; z-index: 60; font-size: 15px; }
 .empty-lib { position: absolute; left: 690px; top: 200px; width: 520px; font-size: 18px; line-height: 1.7; color: #ccc; }
 .empty-lib code { background: #222; padding: 2px 6px; border-radius: 4px; font-size: 15px; }
+
+/* 再生後の評価 */
+.rate { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 820px; max-height: 720px; overflow: auto;
+  background: rgba(14,14,14,.97); border: 2px solid var(--ring); border-radius: 28px; padding: 24px 32px; z-index: 30; }
+.rate h3 { margin: 0; font-size: 28px; font-weight: 800; }
+.rate-sub { color: var(--muted); font-size: 14px; margin: 6px 0 12px; }
+.rate-row { border-top: 1px solid #2a2a2a; padding: 12px 0; }
+.rate-t { font-size: 17px; }
+.rate-t span { color: var(--muted); font-size: 14px; margin-left: 10px; }
+.rate-b { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+.rb { font-size: 17px; font-weight: 800; padding: 6px 22px; border-radius: 18px; border: 2px solid #444; color: #ddd; }
+.rb.good.on { background: #2fd07a; border-color: #2fd07a; color: #000; }
+.rb.bad.on { background: #ff7a59; border-color: #ff7a59; color: #000; }
+.rate-alt { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--muted); }
+.rate-alt .alt { width: auto; margin: 0; }
+.rate-alt .alt.on { outline: 2px solid var(--ring); }
+.rate-foot { display: flex; gap: 16px; align-items: center; justify-content: flex-end; margin-top: 14px; }
+.rate-foot .send { font-size: 18px; font-weight: 800; background: var(--ring); color: #000; padding: 8px 26px; border-radius: 20px; }
+.rate-foot .send:disabled { opacity: .4; }
+.rate-foot .ok { color: #7be0a4; font-weight: 700; }
+.rate-foot .ng { color: #ff7a59; font-weight: 700; }
+.modelnote { position: absolute; right: 42px; top: 72px; color: var(--muted); font-size: 13px; }
+.modelnote b { color: #7be0a4; }
 </style>
 </head>
 <body>
