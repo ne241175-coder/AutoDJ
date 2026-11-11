@@ -11,6 +11,8 @@
   python -m backend.cli genres                                       使えるジャンル
   python -m backend.cli feedback                                     集まった評価と、いまの重み
   python -m backend.cli learn-links [--memos] [--reset]              評価から、つなぎ目の点数の重みを学習
+  python -m backend.cli add-song URL [--title 曲名] [--route A B C]   YouTube の曲を1曲追加（画面の「曲を追加」と同じ）
+  python -m backend.cli routes [--delete ID]                         画面で足したルートの一覧・削除
 """
 import argparse
 import sys
@@ -133,6 +135,32 @@ def cmd_sheet_pick(a):
     from .fetch_songs import set_manual
     vid = set_manual(a.song, a.url)
     print(f"「{a.song}」→ 動画 {vid} を手動指定しました。sheet-fetch --only \"{a.song}\" でダウンロードできます")
+
+
+def cmd_add_song(a):
+    from . import addsong
+    title, artist = a.title, a.artist
+    if not title:
+        info = addsong.lookup(a.url)
+        title, artist = info["title"], artist or info["artist"]
+        print(f"動画: {info['video_title']}（{info['channel']}）→ 曲名「{title}」")
+    j = addsong.submit(a.url, title, artist, a.route, run_now=True)
+    if j["stage"] == "error":
+        raise RuntimeError(j["error"])
+    print(f"[{j['track_id']}] {title}: {j['message']}")
+
+
+def cmd_routes(a):
+    from .db import delete_route, list_routes
+    con = connect()
+    if a.delete:
+        print("消しました" if delete_route(con, a.delete) else f"ID {a.delete} のルートはありません")
+        return
+    rows = list_routes(con)
+    if not rows:
+        print("画面で足したルートはまだありません")
+    for r in rows:
+        print(f"{r['id']:>3}  {r['root']} → {r['middle']} → {r['leaf']}")
 
 
 def cmd_plan(a):
@@ -267,6 +295,17 @@ def main(argv=None):
     s.add_argument("song", help="シートの曲名（例: 青成功でいいじゃない）")
     s.add_argument("url", help="YouTube の URL または動画ID")
     s.set_defaults(fn=cmd_sheet_pick)
+
+    s = sub.add_parser("add-song", help="YouTube の曲を1曲追加（ダウンロード → DB登録 → 解析）")
+    s.add_argument("url", help="YouTube の URL")
+    s.add_argument("--title", help="曲名（省略すると動画の題名から推測）")
+    s.add_argument("--artist")
+    s.add_argument("--route", nargs=3, metavar=("1曲目", "2曲目", "3曲目"), help="曲選びに出すルート（この曲を含める）")
+    s.set_defaults(fn=cmd_add_song)
+
+    s = sub.add_parser("routes", help="画面で足したルートの一覧（--delete ID で削除）")
+    s.add_argument("--delete", type=int)
+    s.set_defaults(fn=cmd_routes)
 
     s = sub.add_parser("plan", help="曲順からつなぎ位置と再生区間を決める（ファイルは切らない）")
     s.add_argument("songs", nargs="+", help="曲名 または ID（流す順）")

@@ -151,7 +151,7 @@ function Loading({ text = "LOADING", sub, progress }) {
 const MenuCtx = createContext(null);
 const useMenu = () => useContext(MenuCtx);
 
-function Menu({ itemsRef, common, open, setOpen }) {
+function Menu({ itemsRef, common, open, setOpen, badge }) {
   useEffect(() => {
     if (!open) return;
     const key = (e) => { if (e.key === "Escape") { setOpen(false); e.stopImmediatePropagation(); e.preventDefault(); } };
@@ -161,7 +161,7 @@ function Menu({ itemsRef, common, open, setOpen }) {
   const items = [...(itemsRef.current || []), ...(common || [])];
   return html`<div onClick=${(e) => e.stopPropagation()}>
     <button class=${`hamb${open ? " on" : ""}`} title="メニュー" onClick=${(e) => { e.currentTarget.blur(); setOpen(!open); }}>
-      <i></i><i></i><i></i></button>
+      <i></i><i></i><i></i>${badge ? html`<b class="hamb-badge">${badge}</b>` : null}</button>
     ${open && html`<div class="menu-veil" onClick=${() => setOpen(false)}></div>`}
     ${open && html`<div class="menu">
       ${items.map((it, i) => it.sep ? html`<hr key=${i} />`
@@ -240,7 +240,7 @@ const WHEEL = {
 };
 const RX = 540, RY = 568;
 
-function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk }) {
+function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk, onAdd, onAnalyze }) {
   const menu = useMenu();
   const conf = STEPS[step];
   const G = WHEEL[conf.side];
@@ -285,6 +285,8 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk 
     { label: previewing ? "■ 試聴を止める" : "▶ サビから試聴", sub: "スペース", onClick: preview, disabled: !cur || !cur.file_exists },
     { label: "この曲に決定", sub: "Enter", onClick: () => choose(cur), disabled: !usable(cur) },
     ...(step > 0 ? [{ label: "◀ ひとつ前に戻る", onClick: onBack }] : []),
+    ...(cur && !cur.file_exists ? [{ label: "この曲の動画を追加", sub: "YouTube", onClick: () => onAdd({ mode: "song", title: cur.title, useRoute: false }) }] : []),
+    ...(cur && cur.file_exists && !cur.analyzed ? [{ label: "この曲を解析する", sub: "20秒くらい", onClick: () => onAnalyze(cur) }] : []),
     { info: "曲の一覧はスクロールか ↑↓ キーで回せます" },
   ];
 
@@ -920,6 +922,184 @@ function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
   </div>`;
 }
 
+
+// ---------------------------------------------------------------- 曲を追加（YouTube）・ルートを追加
+// 曲: URL を貼る → 題名から曲名を推測 → 追加すると裏で ダウンロード → DB登録 → 解析。終わると曲選びに出る
+// ルート: 「1曲目 → 2曲目 → 3曲目」を DB に足す（スプレッドシートの曲リストと合わせて曲選びに出る）
+const NEW = "@new";
+const STAGE_JA = { queued: "順番待ち", download: "ダウンロード", register: "DB に登録", analyze: "解析中", done: "完了", error: "失敗" };
+const jobActive = (j) => j.stage !== "done" && j.stage !== "error";
+const jobLine = (j) => j.stage === "done" ? `✓ ${j.title}: ${j.message}`
+  : j.stage === "error" ? `× ${j.title}: ${j.error}`
+  : `… ${j.title}: ${STAGE_JA[j.stage] || j.stage}${j.stage === "download" && j.progress ? ` ${pct(j.progress)}` : ""}`;
+
+function AddDialog({ init, tracks, routes, onClose, onAdded, onRoutes }) {
+  const isSong = init.mode === "song";
+  const box = useRef(), first = useRef();
+  const [url, setUrl] = useState("");
+  const [info, setInfo] = useState(null);
+  const [look, setLook] = useState({ busy: false, err: null });
+  const [title, setTitle] = useState(init.title || "");
+  const titleEdited = useRef(!!init.title);
+  const [artist, setArtist] = useState("");
+  const [useRoute, setUseRoute] = useState(init.useRoute !== false);
+  const [chain, setChain] = useState(init.chain || ["", "", ""]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  // 後ろの画面のキー操作（矢印・スペース・Enter）を止める。箱の中のキーは箱の onKeyDown で止める
+  useEffect(() => {
+    const key = (e) => {
+      if (box.current && box.current.contains(e.target)) return;
+      e.stopImmediatePropagation();
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", key, true);
+    setTimeout(() => first.current && first.current.focus(), 0);
+    return () => window.removeEventListener("keydown", key, true);
+  }, []);
+
+  // URL を貼ったら動画を調べる（題名・長さ・すでに入っているか）
+  useEffect(() => {
+    const u = url.trim();
+    if (!isSong) return;
+    if (!u || !/(youtu\.?be|^[A-Za-z0-9_-]{11}$)/.test(u)) {
+      setInfo(null);
+      setLook({ busy: false, err: u ? "YouTube の URL を貼ってください" : null });
+      return;
+    }
+    let alive = true;
+    setLook({ busy: true, err: null });
+    const t = setTimeout(() => post("/api/add/lookup", { url: u })
+      .then((j) => {
+        if (!alive) return;
+        setInfo(j);
+        setLook({ busy: false, err: null });
+        if (!titleEdited.current) setTitle(j.existing ? j.existing.title : j.title);
+        setArtist((a) => a || j.artist || "");
+      })
+      .catch((e) => { if (alive) { setInfo(null); setLook({ busy: false, err: e.message }); } }), 350);
+    return () => { alive = false; clearTimeout(t); };
+  }, [url]);
+
+  const name = title.trim();
+  const byTitle = useMemo(() => new Map(tracks.map((t) => [t.title, t])), [tracks]);
+  const titles = useMemo(() => {
+    const s = new Set(tracks.map((t) => t.title));
+    for (const r of routes) for (const c of r.chain || []) s.add(c);
+    return [...s].filter((x) => x && !(isSong && x === name)).sort((a, b) => a.localeCompare(b, "ja"));
+  }, [tracks, routes, name]);
+  const resolved = chain.map((c) => (c === NEW ? name : c));
+  const routeKey = (c) => c.join("\u0001");
+  const exists = routes.some((r) => routeKey(r.chain || []) === routeKey(resolved));
+
+  let problem = null;
+  if (isSong && !info) problem = look.busy ? "動画を調べています…" : "YouTube の URL を貼ってください";
+  else if (isSong && !name) problem = "曲名を入れてください";
+  else if ((useRoute || !isSong) && resolved.some((c) => !c)) problem = "ルートの3曲を選んでください";
+  else if ((useRoute || !isSong) && new Set(resolved).size < 3) problem = "ルートに同じ曲が2回入っています";
+  else if (isSong && useRoute && !chain.includes(NEW)) problem = "ルートのどこかに「この曲」を入れてください";
+  else if (!isSong && exists) problem = "このルートはもうあります";
+
+  const notes = [];
+  if (isSong && info) {
+    const same = byTitle.get(name);
+    if (info.existing && info.existing.title !== name) notes.push(`この動画は「${info.existing.title}」として入っています。曲名を「${name}」に付け替えます`);
+    else if (info.existing) notes.push("この動画はもう入っています（解析をやり直します）");
+    else if (same && same.file_exists) notes.push(`「${name}」はもう入っています。追加すると、この動画に入れ替えます`);
+    else if (titles.includes(name) || routes.some((r) => (r.chain || []).includes(name))) notes.push(`曲リストの「${name}」の音源として入ります`);
+    if (info.duration > 480) notes.push(`長い動画です（${fmt(info.duration)}）。ライブやメドレーではないか確認してください`);
+    if (useRoute && exists) notes.push("このルートはもうあります（曲だけ追加します）");
+  }
+
+  const submit = async () => {
+    if (problem || busy) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      if (isSong) {
+        const job = await post("/api/add", { url: url.trim(), title: name, artist: artist.trim() || null, route: useRoute ? resolved : null });
+        onAdded(job);
+      } else {
+        await post("/api/routes", { chain: resolved });
+        onRoutes(`ルートを追加しました: ${resolved.join(" → ")}`);
+      }
+      onClose();
+    } catch (e) {
+      setMsg(e.message);
+      setBusy(false);
+    }
+  };
+  const remove = async (r) => {
+    try { await api(`/api/routes/${r.route_id}`, { method: "DELETE" }); onRoutes(`ルートを消しました: ${r.chain.join(" → ")}`); }
+    catch (e) { setMsg(e.message); }
+  };
+  const setSlot = (i, v) => setChain((c) => {
+    const n = [...c];
+    if (v === NEW) for (let k = 0; k < 3; k++) if (n[k] === NEW) n[k] = "";   // 「この曲」は1か所だけ
+    n[i] = v;
+    return n;
+  });
+  const mine = routes.filter((r) => r.source === "app");
+
+  return html`<div>
+    <div class="add-veil" onClick=${onClose}></div>
+    <div class="addbox" ref=${box} onKeyDown=${(e) => {
+      e.stopPropagation();
+      if (e.key === "Escape") onClose();
+      else if (e.key === "Enter" && e.target.tagName === "INPUT" && e.target.type === "text") submit();
+    }}>
+      <h3>${isSong ? "曲を追加" : "ルートを追加"}${isSong && html`<span class="tag">YouTube</span>`}</h3>
+      <div class="add-sub">${isSong
+        ? "URL を貼って「追加する」を押すと、ダウンロード → 解析まで裏で進めます（1曲 30秒〜1分）。終わると曲選びに出ます。"
+        : "曲選びの「1曲目 → 2曲目 → 3曲目」の流れを足します。スプレッドシートの曲リストはそのままです。"}</div>
+
+      ${isSong && html`
+        <label class="fld"><span>YouTube の URL</span>
+          <input ref=${first} type="text" value=${url} placeholder="https://www.youtube.com/watch?v=…" onInput=${(e) => setUrl(e.target.value)} /></label>
+        <div class="vid">
+          ${info ? html`<img src=${info.thumbnail} alt="" onError=${(e) => { e.target.style.visibility = "hidden"; }} />
+            <div><b>${info.video_title}</b><em>${info.channel}${info.duration ? `・${fmt(info.duration)}` : ""}</em></div>`
+            : html`<div class=${look.err ? "ng" : "dim"}>${look.busy ? "動画を調べています…" : look.err || "まだ URL がありません"}</div>`}
+        </div>
+        <div class="two">
+          <label class="fld"><span>曲名（曲選びに出る名前）</span>
+            <input type="text" value=${title} onInput=${(e) => { titleEdited.current = true; setTitle(e.target.value); }} /></label>
+          <label class="fld"><span>アーティスト</span>
+            <input type="text" value=${artist} onInput=${(e) => setArtist(e.target.value)} /></label>
+        </div>
+        ${notes.map((n, i) => html`<div key=${i} class="note">※ ${n}</div>`)}
+        <label class="chk"><input type="checkbox" checked=${useRoute} onChange=${(e) => setUseRoute(e.target.checked)} />
+          曲選びのルートに入れる</label>`}
+
+      ${(useRoute || !isSong) && html`<div class="add-chain">
+        ${[0, 1, 2].map((i) => html`<div key=${i} class="slot">
+          <span style=${{ color: PICK[i] }}>${["1曲目", "2曲目", "3曲目"][i]}</span>
+          <select ref=${!isSong && i === 0 ? first : null} value=${chain[i]} onChange=${(e) => setSlot(i, e.target.value)}
+            style=${{ borderColor: chain[i] ? PICK[i] : "#3a3a3a" }}>
+            <option value="">選ぶ…</option>
+            ${isSong && html`<option value=${NEW}>★ この曲${name ? `（${name}）` : ""}</option>`}
+            ${titles.map((t) => html`<option key=${t} value=${t}>${t}${byTitle.get(t) && byTitle.get(t).file_exists ? "" : "（音源なし）"}</option>`)}
+          </select>
+          ${i < 2 && html`<i>▶</i>`}
+        </div>`)}
+      </div>`}
+
+      ${!isSong && mine.length > 0 && html`<div class="mine">
+        <div class="m-h">画面で足したルート</div>
+        ${mine.map((r) => html`<div key=${r.route_id} class="mr"><span>${r.chain.join(" → ")}</span>
+          <button title="消す" onClick=${() => remove(r)}>✕</button></div>`)}
+      </div>`}
+
+      <div class="add-foot">
+        <span class=${msg ? "ng" : "dim"}>${msg || problem || ""}</span>
+        <button class="cancel" onClick=${onClose}>やめる</button>
+        <button class="send" disabled=${!!problem || busy} onClick=${submit}>${busy ? "送信中…" : "追加する"}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 // ---------------------------------------------------------------- 全体
 function App() {
   const scale = useScale();
@@ -942,6 +1122,48 @@ function App() {
   const menuRef = useRef([]);
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => setMenuOpen(false), [screen]);
+  const [dialog, setDialog] = useState(null);    // 曲を追加・ルートを追加
+  const [jobs, setJobs] = useState([]);          // 追加中・追加した曲（サーバの仕事）
+  const [toast, setToast] = useState(null);
+  const seen = useRef(null);                     // 終わったのを知らせ済みの仕事
+
+  const reload = () => Promise.all([api("/api/tracks"), api("/api/routes").catch(() => [])])
+    .then(([t, r]) => { detailCache.clear(); setTracks(t); setRoutes(r); });
+  const pollJobs = () => api("/api/add").then((j) => setJobs(j.jobs)).catch(() => {});
+  useEffect(() => {   // 開く前に終わっていた分は知らせない
+    api("/api/add").then((j) => { seen.current = new Set(j.jobs.filter((x) => !jobActive(x)).map((x) => x.id)); setJobs(j.jobs); })
+      .catch(() => { seen.current = new Set(); });
+  }, []);
+  const anyActive = jobs.some(jobActive);
+  useEffect(() => {
+    if (!anyActive) return;
+    const t = setInterval(pollJobs, 1200);
+    return () => clearInterval(t);
+  }, [anyActive]);
+  useEffect(() => {
+    const ended = jobs.filter((j) => !jobActive(j));
+    if (seen.current == null) return;
+    const fresh = ended.filter((j) => !seen.current.has(j.id));
+    if (!fresh.length) return;
+    fresh.forEach((j) => { seen.current.add(j.id); if (j.track_id != null) waveCache.delete(j.track_id); });
+    if (fresh.some((j) => j.stage === "done")) reload();
+    const j = fresh[0];
+    setToast(j.stage === "done" ? { ok: true, text: `「${j.title}」を追加しました。曲選びに出ます` }
+      : { ok: false, text: `「${j.title}」を追加できませんでした: ${j.error}` });
+  }, [jobs]);
+  useEffect(() => { if (toast) { const t = setTimeout(() => setToast(null), 6000); return () => clearTimeout(t); } }, [toast]);
+  const openAdd = (mode) => {
+    const base = picks.map((t) => t.title);
+    const chain = mode === "song"
+      ? [0, 1, 2].map((i) => (i < Math.min(base.length, 2) ? base[i] : i === Math.min(base.length, 2) ? NEW : ""))
+      : [0, 1, 2].map((i) => base[i] || "");
+    setDialog({ mode, chain });
+  };
+  const analyzeOne = async (t) => {
+    setToast({ ok: true, text: `「${t.title}」を解析しています…` });
+    try { await post(`/api/tracks/${t.id}/analyze`, {}); await reload(); setToast({ ok: true, text: `「${t.title}」を解析しました` }); }
+    catch (e) { setErr(`解析できませんでした: ${e.message}`); }
+  };
 
   useEffect(() => {
     const t0 = Date.now();
@@ -988,7 +1210,12 @@ function App() {
   };
 
   menuRef.current = [];
+  const recent = jobs.filter((j) => jobActive(j) || Date.now() / 1000 - (j.finished || 0) < 600).slice(0, 4);
   const common = [
+    { sep: true },
+    { label: "＋ 曲を追加", sub: "YouTube の URL", onClick: () => openAdd("song") },
+    { label: "＋ ルートを追加", sub: "1曲目→2曲目→3曲目", onClick: () => openAdd("route") },
+    ...(recent.length ? [{ head: "追加した曲" }, ...recent.map((j) => ({ info: jobLine(j) }))] : []),
     { sep: true },
     ...(screen !== "select" || picks.length ? [{ label: "最初から（1曲目を選び直す）", onClick: () => { if (player) player.stop(); setPicks([]); setScreen("select"); } }] : []),
     { label: "旧画面（曲ごとの解析を見る）", onClick: () => window.open("/classic", "_blank") },
@@ -997,7 +1224,7 @@ function App() {
   if (screen === "boot") body = html`<${Loading} sub="曲を読み込んでいます" />`;
   else if (screen === "loading") body = html`<${Loading} sub="音源を準備しています" progress=${load ? load.progress : 0} />`;
   else if (screen === "select") body = html`<${SelectScreen} key=${step} step=${step} options=${options} picks=${picks} byTitle=${byTitle}
-    routesOk=${routes.length > 0}
+    routesOk=${routes.length > 0} onAdd=${setDialog} onAnalyze=${analyzeOne}
     onPick=${(t) => { const p = [...picks, t]; setPicks(p); if (p.length === 3) setScreen("connect"); }}
     onBack=${() => setPicks(picks.slice(0, -1))} />`;
   else if (screen === "connect") body = html`<${ConnectScreen} tracks=${tracks} selected=${picks.map((t) => t.id)}
@@ -1010,8 +1237,13 @@ function App() {
   return html`<div class="viewport"><div class="stage" style=${{ transform: `translate(-50%, -50%) scale(${scale})` }}>
     <${MenuCtx.Provider} value=${menuRef}>
       ${body}
-      ${screen !== "boot" && screen !== "loading" && html`<${Menu} itemsRef=${menuRef} common=${common} open=${menuOpen} setOpen=${setMenuOpen} />`}
+      ${screen !== "boot" && screen !== "loading" && html`<${Menu} itemsRef=${menuRef} common=${common} open=${menuOpen} setOpen=${setMenuOpen}
+        badge=${jobs.filter(jobActive).length} />`}
     </${MenuCtx.Provider}>
+    ${dialog && html`<${AddDialog} init=${dialog} tracks=${tracks} routes=${routes} onClose=${() => setDialog(null)}
+      onAdded=${(j) => { setJobs((js) => [j, ...js.filter((x) => x.id !== j.id)]); setToast({ ok: true, text: `「${j.title}」を追加しています（☰ で進み具合）` }); }}
+      onRoutes=${(text) => { reload(); setToast({ ok: true, text }); }} />`}
+    ${toast && !menuOpen && html`<div class=${`toast${toast.ok ? "" : " bad"}`}>${toast.text}</div>`}
     ${err && html`<div class="err">${err}</div>`}
   </div></div>`;
 }

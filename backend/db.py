@@ -27,6 +27,16 @@ CREATE TABLE IF NOT EXISTS tracks(
   camelot TEXT,
   analysis_path TEXT
 );
+-- 画面（☰ → 曲を追加 / ルートを追加）で足した「1曲目 → 2曲目 → 3曲目」の流れ。
+-- スプレッドシートの「曲リスト」のルートと合わせて曲選びに出す（シートは書き換えない）
+CREATE TABLE IF NOT EXISTS routes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  root TEXT NOT NULL,
+  middle TEXT NOT NULL,
+  leaf TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(root, middle, leaf)
+);
 """
 
 
@@ -57,7 +67,8 @@ def relocate(con):
     return fixed
 
 
-def connect(path=DB_PATH):
+def connect(path=None):
+    path = path or DB_PATH          # 呼ぶたびに読む（テストで差し替えられるように）
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
@@ -91,3 +102,37 @@ def get_or_create_set(con, name):
     cur = con.execute("INSERT INTO sets(name, created_at) VALUES (?,?)", (name, now()))
     con.commit()
     return cur.lastrowid
+
+
+# ---------- 画面で足したルート ----------
+def add_route(con, chain):
+    """chain = [1曲目, 2曲目, 3曲目]（曲名）。戻り値: (id, 新しく足したか)"""
+    chain = [str(c or "").strip() for c in chain]
+    if len(chain) != 3 or not all(chain):
+        raise ValueError("ルートは3曲とも選んでください")
+    if len(set(chain)) != 3:
+        raise ValueError("ルートに同じ曲が2回入っています")
+    row = con.execute("SELECT id FROM routes WHERE root=? AND middle=? AND leaf=?", chain).fetchone()
+    if row:
+        return row["id"], False
+    cur = con.execute("INSERT INTO routes(root, middle, leaf, created_at) VALUES (?,?,?,?)", (*chain, now()))
+    con.commit()
+    return cur.lastrowid, True
+
+
+def list_routes(con):
+    return [dict(r) for r in con.execute("SELECT * FROM routes ORDER BY id")]
+
+
+def delete_route(con, route_id):
+    n = con.execute("DELETE FROM routes WHERE id=?", (route_id,)).rowcount
+    con.commit()
+    return n > 0
+
+
+def rename_in_routes(con, old, new):
+    """曲名を変えたとき、画面で足したルートの曲名も合わせる"""
+    if old and new and old != new:
+        for col in ("root", "middle", "leaf"):
+            con.execute(f"UPDATE OR IGNORE routes SET {col}=? WHERE {col}=?", (new, old))
+        con.commit()

@@ -265,20 +265,26 @@ def set_manual(song, url_or_id):
         near = [n for n in lst["songs"] if song in n or n in song]
         raise ValueError(f"シートに「{song}」がありません" + (f"（候補: {', '.join(near)}）" if near else ""))
     vid = video_id_from(url_or_id)
+    record_choice(song, vid)
+    return vid
+
+
+DL_FIELDS = ["song", "video_id", "title", "duration", "sheet_end", "diff", "status"]
+
+
+def record_choice(song, vid, title="(手動指定)", duration="", status="manual"):
+    """downloads.csv に「この曲はこの動画」と書く（status=manual なら sheet-fetch で選び直さない）"""
     p = SHEET_DIR / "downloads.csv"
-    fields = ["song", "video_id", "title", "duration", "sheet_end", "diff", "status"]
     rows = list(csv.DictReader(open(p, encoding="utf-8"))) if p.exists() else []
     for r in rows:
         if r["song"] == song:
-            r.update(video_id=vid, title="(手動指定)", duration="", diff="", status="manual")
+            r.update(video_id=vid, title=title, duration=duration, diff="", status=status)
             break
     else:
-        rows.append({"song": song, "video_id": vid, "title": "(手動指定)", "duration": "",
-                     "sheet_end": "", "diff": "", "status": "manual"})
+        rows.append({"song": song, "video_id": vid, "title": title, "duration": duration,
+                     "sheet_end": "", "diff": "", "status": status})
     SHEET_DIR.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=DL_FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
-    return vid
-
