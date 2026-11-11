@@ -240,7 +240,8 @@ const WHEEL = {
 };
 const RX = 540, RY = 568;
 
-function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk, onAdd, onAnalyze }) {
+function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk, onAdd, onAnalyze, notes, emptyText, hint, canBackFirst }) {
+  const canBack = step > 0 || canBackFirst;
   const menu = useMenu();
   const conf = STEPS[step];
   const G = WHEEL[conf.side];
@@ -284,7 +285,7 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk,
     { head: `${conf.title}（STEP ${step + 1} / 3）` },
     { label: previewing ? "■ 試聴を止める" : "▶ サビから試聴", sub: "スペース", onClick: preview, disabled: !cur || !cur.file_exists },
     { label: "この曲に決定", sub: "Enter", onClick: () => choose(cur), disabled: !usable(cur) },
-    ...(step > 0 ? [{ label: "◀ ひとつ前に戻る", onClick: onBack }] : []),
+    ...(canBack ? [{ label: step > 0 ? "◀ ひとつ前に戻る" : "◀ アンケートに戻る", onClick: onBack }] : []),
     ...(cur && !cur.file_exists ? [{ label: "この曲の動画を追加", sub: "YouTube", onClick: () => onAdd({ mode: "song", title: cur.title, useRoute: false }) }] : []),
     ...(cur && cur.file_exists && !cur.analyzed ? [{ label: "この曲を解析する", sub: "20秒くらい", onClick: () => onAnalyze(cur) }] : []),
     { info: "曲の一覧はスクロールか ↑↓ キーで回せます" },
@@ -306,7 +307,7 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk,
       else if (e.key === "ArrowUp") { setFocus((f) => Math.max(0, f - 1)); e.preventDefault(); }
       else if (e.key === "Enter" || e.key === "ArrowRight") { if (cur) choose(cur); }
       else if (e.key === " ") { preview(); e.preventDefault(); }
-      else if ((e.key === "Backspace" || e.key === "ArrowLeft" || e.key === "Escape") && step > 0) onBack();
+      else if ((e.key === "Backspace" || e.key === "ArrowLeft" || e.key === "Escape") && canBack) onBack();
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
@@ -328,6 +329,8 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk,
       </div>
       <div class="ttl" style=${{ left: G.tx, fontSize: fs, fontWeight: isCur ? 700 : 500, top: (ROW_H - fs * 1.25) / 2 }}>${t.title}</div>
       ${!usable(t) && html`<div class="sub" style=${{ left: G.tx + 2, top: 122 }}>${!t.file_exists ? "音源なし" : "未解析"}</div>`}
+      ${usable(t) && notes && notes.get(t.id) && html`<div class="sub note" style=${{ left: G.tx + 2, top: 120, maxWidth: conf.side === "right" ? G.tw - 70 : G.tw - 10 }}>
+        ${notes.get(t.id).badge && html`<b style=${{ background: color }}>${notes.get(t.id).badge}</b>`}${notes.get(t.id).line}</div>`}
     </div>`;
   });
 
@@ -346,12 +349,12 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk,
   return html`<div class="screen" onWheel=${onWheel}>
     <div class="wheel" style=${{ left: G.L, top: G.T }}>${rows}
       ${!options.length && html`<div style=${{ position: "absolute", left: conf.side === "left" ? 560 : 120, top: 560, fontSize: 22, color: "#555" }}>
-        ${routesOk ? "この先のルートがありません" : "ルートが読み込めません（sheet-sync を実行してください）"}</div>`}
+        ${emptyText || (routesOk ? "この先のルートがありません" : "ルートが読み込めません（sheet-sync を実行してください）")}</div>`}
     </div>
     <div class="knob" style=${conf.side === "left" ? { left: -61, top: G.centerY - 61 } : { left: W - 61, top: G.centerY - 61 }}></div>
 
     <div class="h1" style=${{ left: G.titleX, top: 32, fontSize: 38 }}>${conf.title}</div>
-    <div class="stepno" style=${{ left: G.titleX, top: 84, color }}>STEP ${step + 1} / 3</div>
+    <div class="stepno" style=${{ left: G.titleX, top: 84, color }}>STEP ${step + 1} / 3${hint && html`<span class="hint">${hint}</span>`}</div>
 
     ${cur && html`
       <div class="bigjk click" style=${{ left: G.bigX, top: G.bigY + 14 }} onClick=${preview} title="サビから試聴（スペースキー）">
@@ -370,8 +373,8 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk,
       </div>`}
 
     <div class="crumbs" style=${{ left: G.bigX, top: 742 }}>${crumbs}</div>
-    ${step > 0 && html`<button class="back" style=${{ left: G.bigX + 270, top: 756 }} onClick=${onBack}>◀ 戻る</button>`}
-    <button class="next" style=${{ left: G.bigX + (step > 0 ? 370 : 300), top: 754 }} disabled=${!usable(cur)} onClick=${() => choose(cur)}>
+    ${canBack && html`<button class="back" style=${{ left: G.bigX + 270, top: 756 }} onClick=${onBack}>◀ 戻る</button>`}
+    <button class="next" style=${{ left: G.bigX + (canBack ? 370 : 300), top: 754 }} disabled=${!usable(cur)} onClick=${() => choose(cur)}>
       決定 <${Tri} size=${44} color=${color} stroke=${4} /></button>
   </div>`;
 }
@@ -923,6 +926,78 @@ function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
 }
 
 
+// ---------------------------------------------------------------- アンケート（最初の曲を選ぶ前）
+// 質問に答えるたびに、合う曲の数と候補（右の円盤）が変わる。最後まで答えると 3〜5 曲が「最初の曲」の候補になる
+const CHOICE_COLOR = ["#00b2ff", "#00ff4d", "#ff3df2", "#ffe600"];
+function SurveyScreen({ survey, answers, setAnswers, live, byId, onDone, onSkip }) {
+  const menu = useMenu();
+  const qs = survey.questions;
+  const [qi, setQi] = useState(() => Math.min(qs.length - 1, qs.findIndex((q) => !(q.id in answers)) < 0 ? qs.length - 1 : qs.findIndex((q) => !(q.id in answers))));
+  const q = qs[qi];
+  const answer = (cid) => {
+    const a = { ...answers, [q.id]: cid };
+    setAnswers(a);
+    if (qi < qs.length - 1) setTimeout(() => setQi(qi + 1), 180);
+    else setTimeout(() => onDone(a), 350);
+  };
+  const back = () => { if (qi > 0) setQi(qi - 1); };
+  const choices = [...q.choices, { id: "any", label: "どれでもいい", desc: "" }];
+  menu.current = [
+    { head: `アンケート（${qi + 1} / ${qs.length}）` },
+    ...(qi > 0 ? [{ label: "◀ ひとつ前の質問", onClick: back }] : []),
+    { label: "答えなおす（最初から）", onClick: () => { setAnswers({}); setQi(0); } },
+    { label: "アンケートをとばす", sub: "全曲から選ぶ", onClick: onSkip },
+    { info: "数字キー 1〜4 でも答えられます" },
+  ];
+  useEffect(() => {
+    const key = (e) => {
+      const n = parseInt(e.key, 10);
+      if (n >= 1 && n <= choices.length) { answer(choices[n - 1].id); e.preventDefault(); }
+      else if ((e.key === "Backspace" || e.key === "ArrowLeft") && qi > 0) { back(); e.preventDefault(); }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  });
+  const roots = (live && live.roots) || [];
+  return html`<div class="screen survey">
+    <div class="wheel" style=${{ left: 675, top: -169 }}></div>
+    <div class="knob" style=${{ left: W - 61, top: 399 - 61 }}></div>
+    <div class="h1" style=${{ left: 83, top: 32, fontSize: 38 }}>${q.q}</div>
+    <div class="stepno" style=${{ left: 83, top: 84, color: CHOICE_COLOR[qi % 4] }}>アンケート ${qi + 1} / ${qs.length}
+      <span class="hint">答えると、最初の曲の候補を ${3}〜${5} 曲にしぼります</span></div>
+    <div class="sv-choices">
+      ${choices.map((c, i) => {
+        const on = answers[q.id] === c.id, any = c.id === "any";
+        const n = any ? survey.n_songs : (survey.counts[q.id] || {})[c.id];
+        const col = any ? "#888" : CHOICE_COLOR[i % 4];
+        return html`<button key=${c.id} class=${`sv-c${any ? " any" : ""}${on ? " on" : ""}`}
+          style=${{ borderColor: on ? col : null, boxShadow: on ? `0 0 0 3px ${col}55` : null }} onClick=${() => answer(c.id)}>
+          <span class="k" style=${{ background: col }}>${i + 1}</span>
+          <span class="l">${c.label}${c.desc && html`<em>${c.desc}</em>`}</span>
+          ${n != null && html`<span class="n">${n}曲</span>`}
+        </button>`;
+      })}
+    </div>
+    <div class="sv-foot">
+      <div class="dots">${qs.map((x, i) => html`<i key=${x.id} class=${i === qi ? "on" : x.id in answers ? "done" : ""}
+        style=${{ background: i === qi || x.id in answers ? CHOICE_COLOR[i % 4] : null }} onClick=${() => setQi(i)}></i>`)}</div>
+      ${qi > 0 && html`<button class="back" style=${{ position: "static" }} onClick=${back}>◀ 戻る</button>`}
+      <button class="sv-skip" onClick=${onSkip}>とばして全曲から選ぶ</button>
+    </div>
+    <div class="sv-live">
+      <div class="sv-n">${live ? html`<b>${live.n_exact}</b> 曲がぴったり` : html`<b>${survey.n_songs}</b> 曲から選びます`}</div>
+      <div class="sv-sub">${Object.keys(answers).length ? "いまの候補（合う順）" : "質問に答えると、ここに候補が出ます"}</div>
+      ${roots.map((r, i) => {
+        const t = byId.get(r.id);
+        return html`<div key=${r.id} class="sv-r" style=${{ animationDelay: `${i * 60}ms` }}>
+          ${t && html`<${Jacket} track=${t} size=${58} />`}
+          <div><b>${r.title}</b><em>${r.tags.join("・")}</em></div>
+        </div>`;
+      })}
+    </div>
+  </div>`;
+}
+
 // ---------------------------------------------------------------- 曲を追加（YouTube）・ルートを追加
 // 曲: URL を貼る → 題名から曲名を推測 → 追加すると裏で ダウンロード → DB登録 → 解析。終わると曲選びに出る
 // ルート: 「1曲目 → 2曲目 → 3曲目」を DB に足す（スプレッドシートの曲リストと合わせて曲選びに出る）
@@ -1104,6 +1179,14 @@ function AddDialog({ init, tracks, routes, onClose, onAdded, onRoutes }) {
 function App() {
   const scale = useScale();
   const [screen, setScreen] = useState("boot");
+  // 曲の選び方: survey = アンケート → 最初の曲の候補 → 2・3曲目は全曲からおすすめ / routes = 決めたルート（シート）
+  const [pickMode, setPickModeS] = useState(() => { try { return localStorage.getItem("autodj.pickmode") || "survey"; } catch (e) { return "survey"; } });
+  const setPickMode = (m) => { setPickModeS(m); try { localStorage.setItem("autodj.pickmode", m); } catch (e) { /* なし */ } };
+  const [survey, setSurvey] = useState(null);    // 質問と、選択肢ごとの曲数
+  const [answers, setAnswers] = useState({});
+  const [live, setLive] = useState(null);        // 答えるたびの候補
+  const [roots, setRoots] = useState(null);      // 最初の曲の候補（"all" = アンケートをとばした）
+  const [rec, setRec] = useState(null);          // 2・3曲目のおすすめ {key, items}
   const [tracks, setTracks] = useState([]);
   const [routes, setRoutes] = useState([]);
   const [picks, setPicks] = useState([]);       // 選んだ曲（track）
@@ -1127,8 +1210,8 @@ function App() {
   const [toast, setToast] = useState(null);
   const seen = useRef(null);                     // 終わったのを知らせ済みの仕事
 
-  const reload = () => Promise.all([api("/api/tracks"), api("/api/routes").catch(() => [])])
-    .then(([t, r]) => { detailCache.clear(); setTracks(t); setRoutes(r); });
+  const reload = () => Promise.all([api("/api/tracks"), api("/api/routes").catch(() => []), api("/api/survey").catch(() => null)])
+    .then(([t, r, sv]) => { detailCache.clear(); setTracks(t); setRoutes(r); if (sv) setSurvey(sv); setRec(null); });
   const pollJobs = () => api("/api/add").then((j) => setJobs(j.jobs)).catch(() => {});
   useEffect(() => {   // 開く前に終わっていた分は知らせない
     api("/api/add").then((j) => { seen.current = new Set(j.jobs.filter((x) => !jobActive(x)).map((x) => x.id)); setJobs(j.jobs); })
@@ -1157,7 +1240,7 @@ function App() {
     const chain = mode === "song"
       ? [0, 1, 2].map((i) => (i < Math.min(base.length, 2) ? base[i] : i === Math.min(base.length, 2) ? NEW : ""))
       : [0, 1, 2].map((i) => base[i] || "");
-    setDialog({ mode, chain });
+    setDialog({ mode, chain, useRoute: mode === "song" && pickMode === "survey" ? false : undefined });
   };
   const analyzeOne = async (t) => {
     setToast({ ok: true, text: `「${t.title}」を解析しています…` });
@@ -1167,17 +1250,69 @@ function App() {
 
   useEffect(() => {
     const t0 = Date.now();
-    Promise.all([api("/api/tracks"), api("/api/routes").catch(() => [])])
-      .then(([t, r]) => { setTracks(t); setRoutes(r); })
+    let first = "select";
+    Promise.all([api("/api/tracks"), api("/api/routes").catch(() => []), api("/api/survey").catch(() => null)])
+      .then(([t, r, sv]) => { setTracks(t); setRoutes(r); setSurvey(sv); if (sv && pickMode === "survey") first = "survey"; })
       .catch((e) => setErr(`サーバに接続できません: ${e.message}`))
-      .finally(() => setTimeout(() => setScreen("select"), Math.max(0, 1100 - (Date.now() - t0))));
+      .finally(() => setTimeout(() => setScreen(first), Math.max(0, 1100 - (Date.now() - t0))));
   }, []);
   useEffect(() => { if (err) { const t = setTimeout(() => setErr(null), 6000); return () => clearTimeout(t); } }, [err]);
 
   const byTitle = useMemo(() => new Map(tracks.map((t) => [t.title, t])), [tracks]);
+  const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const step = picks.length;
+  const surveyMode = pickMode === "survey" && survey;
+
+  // アンケート: 答えるたびに候補を聞く
+  useEffect(() => {
+    if (screen !== "survey") return;
+    if (!Object.keys(answers).length) { setLive(null); return; }
+    let alive = true;
+    post("/api/survey", { answers }).then((j) => alive && setLive(j)).catch(() => {});
+    return () => { alive = false; };
+  }, [answers, screen]);
+  const finishSurvey = async (a) => {
+    try {
+      const j = await post("/api/survey", { answers: a });
+      setRoots(j.roots);
+      setLive(j);
+      setPicks([]);
+      setScreen("select");
+    } catch (e) { setErr(e.message); }
+  };
+  // 2・3曲目: 直前の曲からつながりやすい順（全曲から）
+  const recKey = picks.map((t) => t.id).join(",");
+  useEffect(() => {
+    if (!surveyMode || screen !== "select" || step === 0 || step > 2) return;
+    if (rec && rec.key === recKey) return;
+    let alive = true;
+    const last = picks[picks.length - 1].id;
+    api(`/api/next?after=${last}&exclude=${recKey}`)
+      .then((j) => alive && setRec({ key: recKey, items: j.items }))
+      .catch((e) => { if (alive) { setRec({ key: recKey, items: [] }); setErr(e.message); } });
+    return () => { alive = false; };
+  }, [surveyMode, screen, recKey]);
+  const surveyOptions = useMemo(() => {
+    if (!surveyMode) return null;
+    if (step === 0) {
+      if (roots === "all" || !roots) return tracks.filter(usable).sort((a, b) => a.title.localeCompare(b.title, "ja"));
+      return roots.map((r) => byId.get(r.id)).filter(Boolean);
+    }
+    return rec && rec.key === recKey ? rec.items.map((r) => byId.get(r.id)).filter(Boolean) : [];
+  }, [surveyMode, step, roots, rec, recKey, tracks, byId]);
+  const notes = useMemo(() => {
+    if (!surveyMode) return null;
+    const m = new Map();
+    if (step === 0 && Array.isArray(roots)) {
+      for (const r of roots) m.set(r.id, { badge: r.n_asked && r.hits.length === r.n_asked ? "ぴったり" : r.n_asked ? `${r.hits.length}/${r.n_asked} 一致` : null, line: r.tags.join("・") });
+    } else if (step > 0 && rec && rec.key === recKey) {
+      for (const r of rec.items) m.set(r.id, { badge: `相性 ${Math.round(r.fit * 100)}%`, line: r.kind });
+    }
+    return m;
+  }, [surveyMode, step, roots, rec, recKey]);
+
   // 各ステップの候補（シートのルート）。曲が取り込まれていなければ「音源なし」で表示
-  const options = useMemo(() => {
+  const routeOptions = useMemo(() => {
     const titles = [];
     const add = (x) => { if (x && !titles.includes(x)) titles.push(x); };
     for (const r of routes) {
@@ -1187,6 +1322,7 @@ function App() {
     }
     return titles.map((x) => byTitle.get(x) || { id: `missing:${x}`, title: x, analyzed: false, file_exists: false });
   }, [routes, picks, byTitle]);
+  const options = surveyOptions || routeOptions;
 
   const start = async (p, m) => {
     setMeta(m || null);
@@ -1214,19 +1350,31 @@ function App() {
   const common = [
     { sep: true },
     { label: "＋ 曲を追加", sub: "YouTube の URL", onClick: () => openAdd("song") },
-    { label: "＋ ルートを追加", sub: "1曲目→2曲目→3曲目", onClick: () => openAdd("route") },
+    ...(surveyMode ? [] : [{ label: "＋ ルートを追加", sub: "1曲目→2曲目→3曲目", onClick: () => openAdd("route") }]),
     ...(recent.length ? [{ head: "追加した曲" }, ...recent.map((j) => ({ info: jobLine(j) }))] : []),
     { sep: true },
-    ...(screen !== "select" || picks.length ? [{ label: "最初から（1曲目を選び直す）", onClick: () => { if (player) player.stop(); setPicks([]); setScreen("select"); } }] : []),
+    { head: "曲の選び方" },
+    { label: `${pickMode === "survey" ? "✓ " : ""}アンケート → 全曲からおすすめ`, disabled: !survey,
+      onClick: () => { setPickMode("survey"); setPicks([]); setScreen("survey"); } },
+    { label: `${pickMode === "routes" ? "✓ " : ""}決めたルートから`, sub: "スプレッドシート",
+      onClick: () => { setPickMode("routes"); setPicks([]); setScreen("select"); } },
+    { sep: true },
+    ...(screen !== "survey" && (screen !== "select" || picks.length || surveyMode) ? [{ label: surveyMode ? "最初から（アンケートから）" : "最初から（1曲目を選び直す）",
+      onClick: () => { if (player) player.stop(); setPicks([]); if (surveyMode) { setAnswers({}); setLive(null); setScreen("survey"); } else setScreen("select"); } }] : []),
     { label: "旧画面（曲ごとの解析を見る）", onClick: () => window.open("/classic", "_blank") },
   ];
   let body;
   if (screen === "boot") body = html`<${Loading} sub="曲を読み込んでいます" />`;
   else if (screen === "loading") body = html`<${Loading} sub="音源を準備しています" progress=${load ? load.progress : 0} />`;
+  else if (screen === "survey" && survey) body = html`<${SurveyScreen} survey=${survey} answers=${answers} setAnswers=${setAnswers}
+    live=${live} byId=${byId} onDone=${finishSurvey} onSkip=${() => { setRoots("all"); setPicks([]); setScreen("select"); }} />`;
   else if (screen === "select") body = html`<${SelectScreen} key=${step} step=${step} options=${options} picks=${picks} byTitle=${byTitle}
     routesOk=${routes.length > 0} onAdd=${setDialog} onAnalyze=${analyzeOne}
+    notes=${notes} canBackFirst=${!!surveyMode}
+    hint=${!surveyMode ? null : step === 0 ? (Array.isArray(roots) ? `アンケートから ${roots.length} 曲` : "全曲から") : "つながりやすい順（全曲から）"}
+    emptyText=${!surveyMode ? null : step === 0 ? "使える曲がありません（☰ → 曲を追加）" : rec && rec.key === recKey ? "ほかに使える曲がありません" : "おすすめを計算しています…"}
     onPick=${(t) => { const p = [...picks, t]; setPicks(p); if (p.length === 3) setScreen("connect"); }}
-    onBack=${() => setPicks(picks.slice(0, -1))} />`;
+    onBack=${() => (step === 0 ? setScreen("survey") : setPicks(picks.slice(0, -1)))} />`;
   else if (screen === "connect") body = html`<${ConnectScreen} tracks=${tracks} selected=${picks.map((t) => t.id)}
     styles=${styles} setStyles=${setStyles} minSec=${minSec} setMinSec=${setMinSec} auto=${auto} setAuto=${setAuto}
     match=${match} setMatch=${setMatch} explore=${explore} setExplore=${setExplore}

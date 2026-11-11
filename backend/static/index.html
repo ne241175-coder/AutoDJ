@@ -257,6 +257,34 @@ input[type=text] { cursor: text; }
   color: #000; background: #7be0a4; vertical-align: middle; }
 .rate-t .trytag { color: #000; font-size: 11px; margin-left: 8px; }
 .trytag.big { font-size: 12px; margin-left: 10px; }
+/* アンケート（最初の曲を選ぶ前） */
+.stepno .hint { margin-left: 14px; letter-spacing: .02em; font-weight: 700; color: #888; font-size: 14px; }
+.row .sub.note { color: #333; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.row .sub.note b { color: #000; font-size: 13px; font-weight: 800; padding: 1px 8px; border-radius: 9px; margin-right: 8px; }
+.sv-choices { position: absolute; left: 83px; top: 150px; width: 540px; display: flex; flex-direction: column; gap: 16px; }
+.sv-c { display: flex; align-items: center; gap: 18px; text-align: left; padding: 18px 22px; border-radius: 22px; border: 2px solid #2c2c2c;
+  background: #0f0f0f; transition: transform .12s, border-color .12s; }
+.sv-c:hover { transform: translateX(6px); border-color: #555; }
+.sv-c.on { background: #191919; }
+.sv-c .k { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: #000; font-weight: 800; font-size: 17px; flex: none; }
+.sv-c .l { flex: 1; font-size: 30px; font-weight: 800; }
+.sv-c .l em { display: block; font-style: normal; font-size: 14px; font-weight: 600; color: #888; margin-top: 2px; }
+.sv-c .n { color: #aaa; font-size: 16px; font-weight: 700; }
+.sv-c.any { padding: 10px 22px; border-style: dashed; }
+.sv-c.any .l { font-size: 20px; color: #bbb; }
+.sv-foot { position: absolute; left: 83px; top: 756px; display: flex; align-items: center; gap: 22px; }
+.sv-foot .dots { display: flex; gap: 10px; }
+.sv-foot .dots i { width: 14px; height: 14px; border-radius: 50%; background: #333; cursor: var(--cur-hand); }
+.sv-foot .dots i.on { transform: scale(1.35); }
+.sv-foot .sv-skip { color: #888; font-size: 15px; text-decoration: underline; }
+.sv-live { position: absolute; left: 760px; top: 150px; width: 440px; color: #000; }
+.sv-n { font-size: 26px; font-weight: 800; }
+.sv-n b { font-size: 64px; margin-right: 6px; }
+.sv-sub { font-size: 15px; color: #555; font-weight: 700; margin: 2px 0 14px; }
+.sv-r { display: flex; align-items: center; gap: 14px; padding: 9px 0; border-top: 1.5px solid #bbb; animation: fadein .3s ease both; }
+.sv-r b { display: block; font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+.sv-r em { display: block; font-style: normal; font-size: 13px; color: #555; font-weight: 600; }
+
 /* 曲を追加・ルートを追加 */
 .hamb-badge { position: absolute; right: -7px; top: -7px; min-width: 20px; height: 20px; border-radius: 10px; background: var(--ring);
   color: #000; font-size: 12px; font-weight: 800; line-height: 20px; text-align: center; animation: pulse 1.2s ease-in-out infinite; }

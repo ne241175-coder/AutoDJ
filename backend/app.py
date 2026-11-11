@@ -25,6 +25,9 @@ API（UI を差し替えてもこのまま使える）
                                  → 裏で ダウンロード → DB登録 → 解析 → ルート追加。進み具合は GET /api/add
   POST /api/routes              {"chain": [1曲目, 2曲目, 3曲目]} → 画面からルートを足す（DB の routes）
   DELETE /api/routes/<id>       画面で足したルートを消す（シートのルートは消せない）
+  GET  /api/survey              アンケートの質問と、選択肢ごとに合う曲の数
+  POST /api/survey              {"answers": {"tempo": "fast", "mood": "any", ...}} → 最初の曲の候補 3〜5曲（roots）
+  GET  /api/next?after=ID&exclude=ID,ID  直前の曲からつながりやすい順の、次の曲のおすすめ（全曲から）
 """
 import json
 import re
@@ -235,6 +238,33 @@ def routes_delete(rid):
     if not delete_route(connect(), rid):
         abort(404)
     return jsonify({"ok": True})
+
+
+# ---------- アンケート → 最初の曲、そのあとは全曲からおすすめ ----------
+@app.get("/api/survey")
+def survey():
+    from . import recommend
+    _, profs = recommend.library()
+    return jsonify({"questions": recommend.QUESTIONS, "counts": recommend.choice_counts(profs), "n_songs": len(profs)})
+
+
+@app.post("/api/survey")
+def survey_answer():
+    from . import recommend
+    answers = (request.get_json(force=True) or {}).get("answers") or {}
+    _, profs = recommend.library()
+    return jsonify({"roots": recommend.pick_roots(answers, profs), "n_exact": recommend.n_exact(answers, profs),
+                    "n_songs": len(profs)})
+
+
+@app.get("/api/next")
+def next_songs():
+    from . import recommend
+    try:
+        exclude = [int(x) for x in (request.args.get("exclude") or "").split(",") if x.strip()]
+        return jsonify(recommend.recommend_next(int(request.args["after"]), exclude))
+    except (KeyError, ValueError) as e:
+        return jsonify({"error": f"おすすめを出せません: {e.args[0] if e.args else e}"}), 400
 
 
 # ---------- 曲を追加（YouTube） ----------
