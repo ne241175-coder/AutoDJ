@@ -38,8 +38,16 @@ export async function loadBuffer(id, url) {
   return p;
 }
 
+// BPM・キーを合わせた計画は、加工済みの音声（audio_url）とその秒数（pb_*）で鳴らす
+export function toPlayback(plan) {
+  const items = plan.items.map((it) => ({ ...it, start: it.pb_start ?? it.start, end: it.pb_end ?? it.end }));
+  const transitions = plan.transitions.map((t) => ({ ...t, out: t.pb_out ?? t.out, in: t.pb_in ?? t.in }));
+  return { ...plan, items, transitions };
+}
+
 export class MixPlayer {
   constructor(plan) {
+    plan = toPlayback(plan);
     this.plan = plan;
     this.ctx = null;
     this.buffers = new Map();
@@ -57,19 +65,20 @@ export class MixPlayer {
 
   async load(onProgress) {
     this.ctx = audioContext();
-    const ids = [...new Set(this.plan.items.map((it) => it.track_id))];
+    // 同じ曲でも、テンポ・キーを変えた音声は別物として読む（audio_url ごと）
+    const urls = [...new Set(this.plan.items.map((it) => it.audio_url))];
     let done = 0;
-    await Promise.all(ids.map(async (id) => {
-      if (!this.buffers.has(id)) {
-        const it = this.plan.items.find((x) => x.track_id === id);
+    await Promise.all(urls.map(async (url) => {
+      if (!this.buffers.has(url)) {
+        const it = this.plan.items.find((x) => x.audio_url === url);
         try {
-          this.buffers.set(id, await loadBuffer(id, it.audio_url));
+          this.buffers.set(url, await loadBuffer(url, url));
         } catch (e) {
           throw new Error(`音声を取得できません: ${it.title}`);
         }
       }
       done += 1;
-      onProgress && onProgress(done / ids.length);
+      onProgress && onProgress(done / urls.length);
     }));
   }
 
@@ -97,7 +106,7 @@ export class MixPlayer {
 
     for (const seg of this.layout.segments) {
       if (seg.mixEnd <= T0) continue;
-      const buf = this.buffers.get(seg.track_id);
+      const buf = this.buffers.get(seg.audio_url);
       const src = ctx.createBufferSource();
       src.buffer = buf;
       const hp = ctx.createBiquadFilter();
@@ -112,13 +121,13 @@ export class MixPlayer {
       if (dur <= 0.01) continue;
       const when = abs(Math.max(seg.mixStart, T0));
 
-      // 音量（等パワーのフェード）
+      // 音量（等パワーのフェード）。フェードの曲線と同じ時刻に別の予約を入れると例外になるので、
+      // 曲線が鳴り始めから始まるときは最初の値の予約をしない（曲線の最初の値がそのまま使われる）
       const from = Math.max(seg.mixStart, T0);
-      gain.gain.setValueAtTime(seg.gainAt(from), when);
-      for (const f of [seg.fadeIn, seg.fadeOut]) {
-        if (!f) continue;
+      const fades = [seg.fadeIn, seg.fadeOut].filter((f) => f && f.mixTo - Math.max(f.mixFrom, T0) > 0.002);
+      if (!fades.some((f) => Math.max(f.mixFrom, T0) <= from + 1e-4)) gain.gain.setValueAtTime(seg.gainAt(from), when);
+      for (const f of fades) {
         const a = Math.max(f.mixFrom, T0), b = f.mixTo;
-        if (b <= a) continue;
         const n = Math.max(2, Math.ceil((b - a) * 60));
         const curve = new Float32Array(n);
         for (let k = 0; k < n; k++) curve[k] = seg.gainAt(a + ((b - a) * k) / (n - 1));
@@ -149,7 +158,8 @@ export class MixPlayer {
   locate(mix) {
     const segs = this.layout.segments;
     for (let i = segs.length - 1; i >= 0; i--) {
-      if (mix >= segs[i].mixAnchor || i === 0) return { index: i, pos: segs[i].toPos(mix) };
+      // pos は元の曲の秒数（テンポを変えた音声なら倍率を戻す）
+      if (mix >= segs[i].mixAnchor || i === 0) return { index: i, pos: segs[i].toPos(mix) * segs[i].rate };
     }
     return { index: 0, pos: 0 };
   }
@@ -174,7 +184,9 @@ export function computeLayout(plan) {
     const Lout = len(next);
     const posStart = Math.max(0, it.start - Lin);
     const posEnd = it.end;
-    const fadeIn = prev ? { mixFrom: toMix(it.start - Lin), mixTo: toMix(it.start) } : null;
+    // 曲の頭（in が 0 秒付近）から入るときは、in より前に音が無いので、鳴り始め（0 秒）からフェードインする。
+    // フェードの開始を鳴り始めより前にすると、音量の予約（setValueCurveAtTime）が重なって再生が止まる。
+    const fadeIn = prev && it.start - posStart > 0.005 ? { mixFrom: toMix(posStart), mixTo: toMix(it.start) } : null;
     const fadeOut = next ? { mixFrom: toMix(it.end - Lout), mixTo: toMix(it.end) } : null;
     const gainAt = (m) => {
       let g = 1;
@@ -200,7 +212,7 @@ export function computeLayout(plan) {
       return HP_OFF;
     };
     segs.push({
-      index: i, track_id: it.track_id, title: it.title, posStart, posEnd,
+      index: i, track_id: it.track_id, audio_url: it.audio_url, rate: it.rate || 1, title: it.title, posStart, posEnd,
       mixStart: toMix(posStart), mixEnd: toMix(posEnd), mixAnchor: toMix(anchor),
       fadeIn, fadeOut, gainAt, hpAt, hpEvents, toPos: (m) => anchor + (m - b),
     });

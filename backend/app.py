@@ -5,15 +5,21 @@
 API（UI を差し替えてもこのまま使える）
   GET  /api/tracks              曲一覧（BPM・キー・解析済みか・シートの構成があるか）
   GET  /api/tracks/<id>         1曲の詳細（区間・小節頭・キー候補）。?auto=1 で自動検知の区間だけ
-  GET  /api/audio/<id>          mp3 そのもの（Range対応。ブラウザが必要な部分だけ取りに来る）
+  GET  /api/audio/<id>          mp3 そのもの（Range対応）。?rate=1.02&semi=-1 でテンポ・キーを合わせた音声
   GET  /api/routes              シートの「ルート曲→中間曲→曲名」とつなぎメモ
   GET  /api/tracks/<id>/wave    波形（ピーク値の列。初回だけ計算して保存）
   GET  /api/jacket/<id>         ジャケット画像（data/jackets/曲名.jpg があればそれ、なければ動画のサムネイル）
   POST /api/plan                {"songs": [id or 曲名...], "min_sec": 90, "chorus_grace": 15,
                                  "styles": ["fade", "cut", ...], "use_sheet": false（＝すべて自動検知）,
-                                 "links": {"0": {"out": 秒, "in": 秒}}（候補の選び直し）} → 再生計画
+                                 "links": {"0": {"out": 秒, "in": 秒}}（候補の選び直し）,
+                                 "match_bpm": true, "match_key": true（入る曲を出る曲に合わせる）} → 再生計画
                                  transitions[].explain（なぜここか）/ alternatives（ほかの候補）/ human（シートのメモ）
   POST /api/tracks/<id>/analyze 解析を（再）実行
+  POST /api/feedback            ミックスを聞いた人の評価 {"songs": [...], "links": [{"chosen": 特徴, "rating": "good"|"bad",
+                                 "better": 特徴|null, "others": [特徴...]}]} → data/feedback.jsonl に保存し、重みを学び直す
+  GET  /api/feedback            評価の件数と、いま使っている重み（手で決めた値 or 学習した値）
+  POST /api/render              /api/plan と同じ指定で、できたミックスを mp3 に書き出してダウンロード
+                                 （同じ指定なら data/cache/mix/ に作ったものを使い回す）
 """
 import json
 import re
@@ -26,6 +32,7 @@ from .config import ANALYSIS_DIR, DATA_DIR
 from .db import connect
 from .library import load_analysis, analyze_track
 from .mixplan import build_plan, AUTO_ROLE, ROLE_JA
+from . import linkmodel
 
 STATIC = Path(__file__).resolve().parent / "static"
 JACKET_DIR = DATA_DIR / "jackets"   # ここに「曲名.jpg」を置くとジャケットとして使う
@@ -131,8 +138,17 @@ def audio(tid):
     r = connect().execute("SELECT file_path FROM tracks WHERE id=?", (tid,)).fetchone()
     if r is None or not Path(r["file_path"]).exists():
         abort(404)
+    rate = float(request.args.get("rate", 1.0))
+    semi = int(request.args.get("semi", 0))
+    path = r["file_path"]
+    if abs(rate - 1) > 1e-4 or semi:
+        # BPM・キーを合わせた音声（初回だけ数秒かけて作り、以後は使い回す）
+        from .audio_fx import processed
+        if not (0.5 <= rate <= 2.0 and -6 <= semi <= 6):
+            abort(400)
+        path = processed(path, tid, rate, semi)
     # conditional=True で Range リクエスト（途中から読む）に対応
-    return send_file(r["file_path"], conditional=True)
+    return send_file(path, conditional=True, mimetype="audio/mpeg")
 
 
 @app.get("/api/jacket/<int:tid>")
@@ -191,22 +207,85 @@ def routes():
     return jsonify(out)
 
 
+def _plan_from(body):
+    songs = body.get("songs") or []
+    if len(songs) < 2:
+        raise ValueError("2曲以上選んでください")
+    return build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
+                      chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"),
+                      links=body.get("links"), match_bpm=body.get("match_bpm", True),
+                      match_key=body.get("match_key", True))
+
+
 @app.post("/api/plan")
 def plan():
     body = request.get_json(force=True)
-    songs = body.get("songs") or []
-    if len(songs) < 2:
-        return jsonify({"error": "2曲以上選んでください"}), 400
     try:
-        p = build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
-                       chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"),
-                       links=body.get("links"))
+        p = _plan_from(body)
     except (KeyError, RuntimeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     for it in p["items"]:
-        it["audio_url"] = f"/api/audio/{it['track_id']}"
+        q = f"?rate={it['rate']:.5f}&semi={it['semitones']}" if (it.get("rate", 1.0) != 1.0 or it.get("semitones")) else ""
+        it["audio_url"] = f"/api/audio/{it['track_id']}{q}"
         it.pop("file", None)
     return jsonify(p)
+
+
+MIX_DIR = DATA_DIR / "cache" / "mix"
+
+
+@app.post("/api/render")
+def render_mix():
+    """画面で聞いたのと同じミックスを mp3 にする（つなぎ位置・繋ぎ方・BPM/キー合わせもそのまま）"""
+    import hashlib
+    from .render import render
+    body = request.get_json(force=True) or {}
+    try:
+        p = _plan_from(body)
+    except (KeyError, RuntimeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    # 同じ計画なら作り直さない（計画の中身と、使う音源の更新時刻から名前を決める）
+    sig = json.dumps({"items": [[it["file"], it["start"], it["end"], it.get("rate"), it.get("semitones")] for it in p["items"]],
+                      "trans": [[t["out"], t["in"], t.get("overlap_beats"), t.get("style")] for t in p["transitions"]],
+                      "mtime": [Path(it["file"]).stat().st_mtime if Path(it["file"]).exists() else 0 for it in p["items"]]},
+                     sort_keys=True)
+    MIX_DIR.mkdir(parents=True, exist_ok=True)
+    out = MIX_DIR / f"{hashlib.sha1(sig.encode()).hexdigest()[:16]}.mp3"
+    if not out.exists():
+        try:
+            made, cue = render(p, out)
+        except (OSError, RuntimeError, ValueError) as e:
+            return jsonify({"error": f"書き出せませんでした: {e}"}), 500
+        if made != out:      # ffmpeg が無いときは wav になる
+            out = made
+    name = "AutoDJ_" + "_".join(re.sub(r'[\\/:*?"<>|\s]+', "", it["title"])[:20] for it in p["items"]) + out.suffix
+    return send_file(out, as_attachment=True, download_name=name,
+                     mimetype="audio/mpeg" if out.suffix == ".mp3" else "audio/wav")
+
+
+@app.post("/api/feedback")
+def feedback():
+    body = request.get_json(force=True) or {}
+    links = [l for l in (body.get("links") or []) if isinstance(l, dict) and l.get("chosen")]
+    if not links:
+        return jsonify({"error": "評価がありません"}), 400
+    allowed = set(linkmodel.FEATURES)
+    clean = lambda f: {k: float(v) for k, v in (f or {}).items() if k in allowed} if f else None   # noqa: E731
+    entry = {"songs": body.get("songs") or [], "auto": bool(body.get("auto", True)), "source": body.get("source", "ui"),
+             "links": [{"k": l.get("k"), "rating": l.get("rating") if l.get("rating") in ("good", "bad") else None,
+                        "chosen": clean(l["chosen"]), "better": clean(l.get("better")),
+                        "others": [clean(o) for o in (l.get("others") or [])[:6] if o],
+                        "kind": l.get("kind"), "better_kind": l.get("better_kind")} for l in links]}
+    linkmodel.record(entry)
+    res = linkmodel.learn() if app.config.get("AUTO_LEARN", True) else {"saved": False}
+    return jsonify({"ok": True, "learned": res.get("saved", False), "model": linkmodel.model_info(),
+                    "message": res.get("message")})
+
+
+@app.get("/api/feedback")
+def feedback_summary():
+    return jsonify({"model": linkmodel.model_info(), "weights": linkmodel.current_weights(),
+                    "default": linkmodel.DEFAULT_WEIGHTS, "labels": linkmodel.FEATURE_JA})
 
 
 @app.post("/api/tracks/<int:tid>/analyze")

@@ -11,3 +11,6 @@ mix*.mp3
 mix*.wav
 mix*.txt
 data/jackets/
+data/cache/
+data/feedback.jsonl
+data/link_model.json

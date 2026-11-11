@@ -383,7 +383,8 @@ function useMixPeaks(plan, layout, n = 900) {
           if (m < s.mixStart || m > s.mixEnd) continue;
           const w = waves.get(s.track_id), d = durs.get(s.track_id);
           if (!w || !d) continue;
-          v = Math.max(v, w[Math.min(w.length - 1, Math.floor((s.toPos(m) / d) * w.length))] * s.gainAt(m));
+          const pos = s.toPos(m) * s.rate;   // 元の曲の秒数
+          v = Math.max(v, w[Math.min(w.length - 1, Math.floor((pos / d) * w.length))] * s.gainAt(m));
         }
         out[x] = v;
       }
@@ -416,6 +417,13 @@ function SongStrip({ track, item, auto, width, mark, markColor, markLabel, side 
   </div>`;
 }
 
+// キーの相性の言葉（合わせた後のキーどうしで）
+function keyWord(t, mark = false) {
+  const d = t.matched ? t.matched.key_distance_after : (t.explain && t.explain.key ? t.explain.key.distance : null);
+  const w = d === 0 ? "同じキー" : d === 1 ? "隣どうし" : d === 2 ? "2つ隣" : "遠い";
+  return mark ? `${d <= 1 ? "◎" : d === 2 ? "○" : "△"} ${w}` : w;
+}
+
 function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previewing }) {
   const t = plan.transitions[k];
   const a = plan.items[k], b = plan.items[k + 1];
@@ -432,7 +440,7 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
   // 「サビ終わり→サビ頭」を左右に分ける（シートのメモなど「→」が無いときは区間名か「指定の位置」）
   const parts = t.kind.includes("→") ? t.kind.split("→")
     : [ex.out_section ? `${ex.out_section.label}終わり` : "指定の位置", ex.in_section ? `${ex.in_section.label}頭` : "指定の位置"];
-  const nAlt = h && h.nearest ? 2 : 3;
+  const nAlt = h && h.nearest ? 2 : 4;
   return html`<div class="explain">
     <div class="ex-head">
       <span class="badge" style=${{ background: auto ? "#ffe600" : "#7be0a4" }}>${auto ? "自動検知" : "シートの手入力を使用"}</span>
@@ -451,10 +459,17 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
         <${SongStrip} track=${tb} item=${b} auto=${auto} width=${WD} mark=${t.in} markColor=${PICK[k + 1]} markLabel="ここから入る" side="up" />
       </div>
       <div class="ex-right">
-        <div class="why"><span>テンポ</span><b>${tempo.a} → ${tempo.b} BPM</b><em>${tempoMark} 差 ${(tempo.gap * 100).toFixed(1)}%</em></div>
-        <div class="why"><span>キー</span><b>${key.a} → ${key.b}</b><em>${keyMark}</em></div>
+        <div class="why"><span>テンポ</span><b>${a.bpm.toFixed(1)} → ${(b.orig_bpm ?? b.bpm).toFixed(1)} BPM</b>
+          <em>${b.rate !== 1 ? html`<span class="ok">合わせて ${b.bpm.toFixed(1)}（×${b.rate.toFixed(3)}、音程そのまま）</span>`
+            : (b.match_note || []).some((x) => x.startsWith("テンポ")) ? "△ 差が大きいので合わせない"
+            : `${tempoMark} 差 ${(tempo.gap * 100).toFixed(1)}%`}</em></div>
+        <div class="why"><span>キー</span><b>${a.camelot} → ${b.orig_camelot ?? b.camelot}</b>
+          <em>${b.semitones ? html`<span class="ok">${b.semitones > 0 ? "+" : ""}${b.semitones}半音 移調して ${b.camelot}（${keyWord(t)}）</span>`
+            : keyWord(t, true)}</em></div>
+        ${ex.energy && ex.energy.out != null && html`<div class="why"><span>音の勢い</span>
+          <b>${pct(ex.energy.out)} → ${pct(ex.energy.in)}</b><em>${ex.energy.fit >= 0.8 ? "◎" : ex.energy.fit >= 0.5 ? "○" : "△"} つながり ${pct(ex.energy.fit)}</em></div>`}
         ${auto && html`<div class="why"><span>区切りの確かさ</span><b>出 ${pct(ex.confidence && ex.confidence.out)} / 入 ${pct(ex.confidence && ex.confidence.in)}</b>
-          <em>学習モデルの信頼度</em></div>`}
+          </div>`}
         ${h && html`<div class="why human"><span>人のメモ</span><b>${fmt(h.out)} → ${fmt(h.in)}</b>
           <em>${h.nearest ? `自動の候補で一番近いもの: 差 ${Math.abs(h.nearest.diff_out).toFixed(1)}秒 / ${Math.abs(h.nearest.diff_in).toFixed(1)}秒` : ""}</em></div>`}
         <button class="listen-btn" onClick=${() => onPreview(k)}>${previewing ? "■ 止める" : "▶ このつなぎを試聴"}</button>
@@ -468,7 +483,7 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
   </div>`;
 }
 
-function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec, auto, setAuto, onBack, onStart, onError }) {
+function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec, auto, setAuto, match, setMatch, onBack, onStart, onError }) {
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const [base, setBase] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -478,23 +493,36 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
   const [hover, setHover] = useState(null);
   const previewer = useRef(null);
   const hoverTimer = useRef(null);
+  const autoPick = useRef({});                  // 選び直す前の、自動で選ばれたつなぎ目（評価の材料）
 
-  useEffect(() => setLinks({}), [selected.join(","), auto]);
+  useEffect(() => { setLinks({}); autoPick.current = {}; }, [selected.join(","), auto]);
+  useEffect(() => {
+    if (!base) return;
+    base.transitions.forEach((t, k) => { if (!links[k]) autoPick.current[k] = { features: t.features, kind: t.kind }; });
+  }, [base]);
+  // 画面で候補を選び直した = 「自動の1位より、こっちが良い」という評価として送る
+  const picksForFeedback = () => Object.keys(links).map((k) => {
+    const a = autoPick.current[k], t = plan && plan.transitions[k];
+    return a && t && a.features && t.features ? { k: +k, chosen: a.features, kind: a.kind, better: t.features, better_kind: t.kind } : null;
+  }).filter(Boolean);
   useEffect(() => {
     let alive = true;
     setBusy(true);
     const tm = setTimeout(() => {
-      post("/api/plan", { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links })
+      post("/api/plan", { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links,
+                          match_bpm: match.bpm, match_key: match.key })
         .then((p) => { alive && setBase(p); })
         .catch((e) => alive && onError(e.message))
         .finally(() => alive && setBusy(false));
     }, 200);
     return () => { alive = false; clearTimeout(tm); };
-  }, [selected.join(","), minSec, auto, JSON.stringify(links)]);
+  }, [selected.join(","), minSec, auto, JSON.stringify(links), match.bpm, match.key]);
+  // 音声は先に読み込んでおく（テンポ・キーを合わせた音声はサーバが作るので少し待つ）
   useEffect(() => {
+    if (!base) return;
     audioContext();
-    selected.forEach((id) => loadBuffer(id, `/api/audio/${id}`).catch(() => {}));
-  }, [selected.join(",")]);
+    base.items.forEach((it) => loadBuffer(it.audio_url, it.audio_url).catch(() => {}));
+  }, [base && base.items.map((it) => it.audio_url).join(",")]);
 
   const plan = useMemo(() => (base ? withStyles(base, styles) : null), [base, styles.join(",")]);
   const layout = useMemo(() => (plan ? new MixPlayer(plan).layout : null), [plan]);
@@ -535,12 +563,14 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     stopPreview();
   };
 
-  const S = 190, gap = 210, x0 = (W - (3 * S + 2 * gap)) / 2;
+  const S = 166, gap = 230, x0 = (W - (3 * S + 2 * gap)) / 2;
   const xOf = (i) => x0 + i * (S + gap);
-  const Y = 96;
+  const Y = 88;
 
   return html`<div class="screen" onClick=${() => { setOpen(null); }}>
     <div class="h1" style=${{ left: 55, top: 22, fontSize: 38 }}>繋ぎ方を選んでね</div>
+    ${plan && plan.model && html`<div class="modelnote">点数の重み：${plan.model.source === "learned"
+      ? html`<b>評価から学習</b>（${plan.model.n_feedback}回分）` : `手で決めた値${plan.model.n_feedback ? `（評価 ${plan.model.n_feedback}回分）` : ""}`}</div>`}
     <div class="modes" onClick=${(e) => e.stopPropagation()}>
       <button class=${auto ? "on" : ""} onClick=${() => setAuto(true)}>自動検知</button>
       <button class=${!auto ? "on" : ""} onClick=${() => setAuto(false)}>シートの手入力</button>
@@ -553,12 +583,14 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
         <${Jacket} track=${t} size=${S} style=${{ boxShadow: `0 0 0 4px ${PICK[i]}` }} />
         <div class="t">${t ? t.title : id}</div>
         <div class="r">${it ? `${fmt(it.start)} → ${fmt(it.end)}（${Math.round(it.end - it.start)}秒）` : busy ? "計算中…" : ""}</div>
+        ${it && html`<div class="r fx">${Math.round(it.bpm)} BPM${it.rate !== 1 ? html` <b>×${it.rate.toFixed(3)}</b>` : ""}
+          ・${it.camelot}${it.semitones ? html` <b>(${it.semitones > 0 ? "+" : ""}${it.semitones})</b>` : ""}</div>`}
       </div>`;
     })}
     ${selected.slice(1).map((_, k) => {
       const st = styles[k] || "auto";
       const cx = xOf(k) + S + gap / 2;
-      return html`<div key=${k} class=${`arrow${sel === k ? " sel" : ""}`} style=${{ left: cx - 90, width: 180, top: Y + 30 }}>
+      return html`<div key=${k} class=${`arrow${sel === k ? " sel" : ""}`} style=${{ left: cx - 90, width: 180, top: Y + 20 }}>
         <button title="繋ぎ方を選ぶ" onClick=${(e) => { e.stopPropagation(); setSel(k); setOpen(open === k ? null : k); }}>
           <${Tri} size=${84} color=${STYLE[st].color} /></button>
         <div class="lab" style=${{ color: STYLE[st].color }}>${STYLE[st].label}</div>
@@ -591,12 +623,16 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     <div class="ctl" style=${{ top: 776, left: 250 }} onClick=${(e) => e.stopPropagation()}>
       <span>1曲を最低 <b>${minSec}</b> 秒流す <input type="range" min="45" max="180" step="5" value=${minSec}
         onInput=${(e) => setMinSec(+e.target.value)} /></span>
+      <label><input type="checkbox" checked=${match.bpm} onChange=${(e) => setMatch({ ...match, bpm: e.target.checked })} />BPMを合わせる</label>
+      <label><input type="checkbox" checked=${match.key} onChange=${(e) => setMatch({ ...match, key: e.target.checked })} />キーを合わせる</label>
       <span>全体 <b>${layout ? fmt(layout.total) : "-:--"}</b></span>
       ${Object.keys(links).length > 0 && html`<button class="mini" onClick=${() => setLinks({})}>候補を元に戻す</button>`}
     </div>
     <button class="back" style=${{ left: 40, top: 772 }} onClick=${onBack}>◀ 曲を選び直す</button>
     <button class="next" style=${{ left: 1060, top: 760 }} disabled=${!plan || busy}
-      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
+      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan, { picks: picksForFeedback(), auto, songs: selected,
+        req: { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links,
+               match_bpm: match.bpm, match_key: match.key } }); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
   </div>`;
 }
 
@@ -635,7 +671,91 @@ function RingViz({ player, color }) {
   return html`<canvas ref=${ref} class="ringviz"></canvas>`;
 }
 
-function PlayScreen({ tracks, plan, player, onBack }) {
+// ---------------------------------------------------------------- できたミックスを mp3 で保存
+// 画面で聞いたのと同じ指定（曲・つなぎ位置・繋ぎ方・BPM/キー合わせ）をサーバに送り、書き出した mp3 を受け取る
+function useMp3Download(req, onError) {
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!req || busy) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+      const cd = r.headers.get("Content-Disposition") || "";
+      const m = cd.match(/filename\*=UTF-8''([^;]+)/i) || cd.match(/filename="?([^";]+)"?/i);
+      const name = m ? decodeURIComponent(m[1]) : "AutoDJ_mix.mp3";
+      const url = URL.createObjectURL(await r.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = name; document.body.appendChild(a); a.click();
+      setTimeout(() => a.remove(), 1000);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { onError && onError(`mp3 を書き出せませんでした: ${e.message}`); }
+    setBusy(false);
+  };
+  return [save, busy];
+}
+
+// ---------------------------------------------------------------- 再生後の評価（つなぎ目ごと）
+// 「良い／微妙」と、微妙なら「こっちの方が良さそう」を選んでもらい、/api/feedback へ送る。
+// サーバはそれを貯めて、つなぎ目の点数の重みを学び直す（backend/linkmodel.py）。
+function RatePanel({ plan, player, meta, onClose, onSave, saving }) {
+  const [r, setR] = useState({});        // k → { rating, better }
+  const [sent, setSent] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const layout = player.layout;
+  const set = (k, v) => setR({ ...r, [k]: { ...(r[k] || {}), ...v } });
+  const listen = (k) => player.play(Math.max(0, layout.transitionsMix[k] - 8));
+  const n = Object.values(r).filter((x) => x.rating).length + (meta.picks || []).length;
+  const submit = async () => {
+    setBusy(true);
+    const links = plan.transitions.map((t, k) => {
+      const x = r[k] || {};
+      if (!x.rating) return null;
+      const alts = (t.alternatives || []).filter((c) => c.features);
+      const b = x.better != null ? alts[x.better] : null;
+      return { k, rating: x.rating, chosen: t.features, kind: t.kind, others: alts.slice(0, 4).map((c) => c.features),
+               better: b ? b.features : null, better_kind: b ? b.kind : null };
+    }).filter(Boolean).concat(meta.picks || []);
+    try {
+      const res = await post("/api/feedback", { songs: meta.songs, auto: meta.auto, links });
+      setSent(res);
+    } catch (e) { setSent({ error: e.message }); }
+    setBusy(false);
+  };
+  return html`<div class="rate" onClick=${(e) => e.stopPropagation()}>
+    <h3>つなぎ目はどうだった？</h3>
+    <div class="rate-sub">評価すると、次から点数のつけ方（重み）が少しずつ学習されます</div>
+    ${plan.transitions.map((t, k) => {
+      const x = r[k] || {};
+      const alts = (t.alternatives || []).filter((c) => c.features).slice(0, 3);
+      return html`<div key=${k} class="rate-row">
+        <div class="rate-t"><b style=${{ color: PICK[k] }}>${plan.items[k].title}</b> → <b style=${{ color: PICK[k + 1] }}>${plan.items[k + 1].title}</b>
+          <span>${t.kind}（${fmt(t.out)} → ${fmt(t.in)}）</span></div>
+        <div class="rate-b">
+          <button class="mini" onClick=${() => listen(k)}>▶ もう一度聞く</button>
+          <button class=${`rb good${x.rating === "good" ? " on" : ""}`} onClick=${() => set(k, { rating: "good", better: null })}>良い</button>
+          <button class=${`rb bad${x.rating === "bad" ? " on" : ""}`} onClick=${() => set(k, { rating: "bad" })}>微妙</button>
+        </div>
+        ${x.rating === "bad" && alts.length > 0 && html`<div class="rate-alt"><span>こっちの方が良さそう？（任意）</span>
+          ${alts.map((c, i) => html`<button key=${i} class=${`alt${x.better === i ? " on" : ""}`}
+            onClick=${() => set(k, { better: x.better === i ? null : i })}><span>${c.kind}</span><b>${fmt(c.out)} → ${fmt(c.in)}</b><em></em></button>`)}
+        </div>`}
+      </div>`;
+    })}
+    ${(meta.picks || []).length > 0 && html`<div class="rate-sub">画面で選び直した候補 ${meta.picks.length} 件も「こっちが良い」として送ります</div>`}
+    <div class="rate-foot">
+      ${sent ? (sent.error ? html`<span class="ng">送れませんでした: ${sent.error}</span>`
+        : html`<span class="ok">ありがとう！ ${sent.model.source === "learned"
+            ? `評価 ${sent.model.n_feedback}回分から重みを学び直しました` : `評価 ${sent.model.n_feedback}回分（もう少し集まると学習します）`}</span>`)
+        : html`<button class="send" disabled=${busy || n === 0} onClick=${submit}>${busy ? "送信中…" : "評価を送る"}</button>`}
+      ${onSave && html`<button class="mini" disabled=${saving} onClick=${onSave}>${saving ? "書き出し中…" : "⬇ MP3で保存"}</button>`}
+      <button class="mini" onClick=${onClose}>${sent ? "閉じる" : "あとで"}</button>
+    </div>
+  </div>`;
+}
+
+function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
+  const [saveMp3, saving] = useMp3Download(meta && meta.req, onError);
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const [now, setNow] = useState(0);
   const [playing, setPlaying] = useState(player.playing);
@@ -650,6 +770,9 @@ function PlayScreen({ tracks, plan, player, onBack }) {
   // つなぎ目の前後は、どこでつないでいるかを表示する
   const nearK = layout.transitionsMix.findIndex((t) => now >= t - 10 && now <= t + 5);
   const nearT = nearK >= 0 ? plan.transitions[nearK] : null;
+  const [rating, setRating] = useState(false);
+  const [asked, setAsked] = useState(false);
+  useEffect(() => { if (ended && !asked) { setRating(true); setAsked(true); } }, [ended]);
 
   const toggle = () => (player.playing ? player.stop() : player.play(ended ? 0 : player.now()));
   const skip = () => { if (nextT != null) player.play(Math.max(player.now(), nextT - 10)); };
@@ -673,6 +796,9 @@ function PlayScreen({ tracks, plan, player, onBack }) {
 
   return html`<div class="screen">
     <button class="back" style=${{ left: 36, top: 20 }} onClick=${onBack}>◀ 繋ぎ方へ</button>
+    <button class="back" style=${{ left: 1110, top: 20 }} onClick=${() => setRating(true)}>★ 評価する</button>
+    ${meta && meta.req && html`<button class="back" style=${{ left: 940, top: 20 }} disabled=${saving} onClick=${saveMp3}
+      title="このミックスを1つの mp3 ファイルとして保存">${saving ? "書き出し中…" : "⬇ MP3で保存"}</button>`}
     <div class="queue">
       ${plan.items.map((x, i) => html`<div key=${i} class=${`q click${i === index ? " on" : ""}`} onClick=${() => seekSong(i)}>
         <${Jacket} track=${byId.get(x.track_id)} size=${56} style=${{ boxShadow: i === index ? `0 0 0 3px ${PICK[i % PICK.length]}` : null }} />
@@ -713,6 +839,8 @@ function PlayScreen({ tracks, plan, player, onBack }) {
     <div class="timeline"><${Wave} peaks=${mixPeaks} width=${1200} height=${34} duration=${layout.total} colorAt=${mixColorAt(layout)}
       progress=${now} onSeek=${(t) => player.play(t)}
       markers=${layout.transitionsMix.map((t, k) => ({ t, color: STYLE[plan.transitions[k].style || "auto"].color }))} /></div>
+    ${rating && html`<${RatePanel} plan=${plan} player=${player} meta=${meta || {}} onClose=${() => setRating(false)}
+      onSave=${meta && meta.req ? saveMp3 : null} saving=${saving} />`}
   </div>`;
 }
 
@@ -726,8 +854,10 @@ function App() {
   const [styles, setStyles] = useState(["auto", "auto"]);
   const [minSec, setMinSec] = useState(90);
   const [auto, setAuto] = useState(true);       // 発表用: 既定は「自動検知」
+  const [match, setMatch] = useState({ bpm: true, key: true });   // BPM・キーを合わせる
   const [player, setPlayer] = useState(null);
   const [plan, setPlan] = useState(null);
+  const [meta, setMeta] = useState(null);       // 評価に添える情報（曲・選び直した候補）
   const [load, setLoad] = useState(null);
   const [err, setErr] = useState(null);
 
@@ -754,7 +884,8 @@ function App() {
     return titles.map((x) => byTitle.get(x) || { id: `missing:${x}`, title: x, analyzed: false, file_exists: false });
   }, [routes, picks, byTitle]);
 
-  const start = async (p) => {
+  const start = async (p, m) => {
+    setMeta(m || null);
     audioContext().resume();   // クリックした瞬間に音を出せる状態にする（ブラウザの制限）
     if (player) player.stop();
     const pl = new MixPlayer(p);
@@ -783,8 +914,9 @@ function App() {
     onBack=${() => setPicks(picks.slice(0, -1))} />`;
   else if (screen === "connect") body = html`<${ConnectScreen} tracks=${tracks} selected=${picks.map((t) => t.id)}
     styles=${styles} setStyles=${setStyles} minSec=${minSec} setMinSec=${setMinSec} auto=${auto} setAuto=${setAuto}
+    match=${match} setMatch=${setMatch}
     onError=${setErr} onBack=${() => { setPicks(picks.slice(0, 2)); setScreen("select"); }} onStart=${start} />`;
-  else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player}
+  else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player} meta=${meta} onError=${setErr}
     onBack=${() => { player.stop(); setScreen("connect"); }} />`;
 
   return html`<div class="viewport"><div class="stage" style=${{ transform: `translate(-50%, -50%) scale(${scale})` }}>

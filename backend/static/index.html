@@ -88,8 +88,11 @@ input[type=text] { cursor: text; }
 .chain { position: absolute; left: 0; right: 0; top: 160px; height: 400px; overflow-x: auto; overflow-y: visible; }
 .chain::-webkit-scrollbar { height: 6px; } .chain::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 .cj { position: absolute; }
-.cj .t { margin-top: 12px; font-weight: 800; font-size: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cj .r { margin-top: 4px; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cj .t { margin-top: 8px; font-weight: 800; font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cj .r.fx { overflow: visible; width: 240px; }
+.cj .r.fx b { color: #ffe600; font-weight: 800; }
+.why .ok { color: #ffe600; font-weight: 700; }
+.cj .r { margin-top: 2px; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .arrow { position: absolute; display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .arrow button { transition: transform .15s; }
 .arrow button:hover { transform: scale(1.12); }
@@ -147,9 +150,9 @@ input[type=text] { cursor: text; }
 .pin i { position: absolute; left: -2px; top: 0; bottom: 0; width: 4px; border-radius: 2px; box-shadow: 0 0 10px currentColor; }
 .pin span { position: absolute; left: 8px; top: 2px; font-size: 12px; font-weight: 800; white-space: nowrap; background: rgba(0,0,0,.75); padding: 0 5px; border-radius: 4px; }
 .link { display: block; }
-.why { display: grid; grid-template-columns: 112px 1fr; column-gap: 8px; row-gap: 1px; font-size: 14px; }
+.why { display: grid; grid-template-columns: 112px 1fr; column-gap: 8px; row-gap: 0; font-size: 13px; }
 .why span { color: #888; grid-row: span 2; padding-top: 2px; }
-.why b { color: #fff; font-size: 16px; }
+.why b { color: #fff; font-size: 15px; }
 .why em { font-style: normal; color: #aaa; font-size: 12px; }
 .why.human b { color: #7be0a4; }
 .listen-btn { margin-top: 2px; align-self: flex-start; font-weight: 800; font-size: 15px; padding: 7px 16px; border-radius: 18px; background: #ff3df2; color: #000; }
@@ -198,6 +201,29 @@ input[type=text] { cursor: text; }
   padding: 8px 16px; border-radius: 8px; z-index: 60; font-size: 15px; }
 .empty-lib { position: absolute; left: 690px; top: 200px; width: 520px; font-size: 18px; line-height: 1.7; color: #ccc; }
 .empty-lib code { background: #222; padding: 2px 6px; border-radius: 4px; font-size: 15px; }
+
+/* 再生後の評価 */
+.rate { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 820px; max-height: 720px; overflow: auto;
+  background: rgba(14,14,14,.97); border: 2px solid var(--ring); border-radius: 28px; padding: 24px 32px; z-index: 30; }
+.rate h3 { margin: 0; font-size: 28px; font-weight: 800; }
+.rate-sub { color: var(--muted); font-size: 14px; margin: 6px 0 12px; }
+.rate-row { border-top: 1px solid #2a2a2a; padding: 12px 0; }
+.rate-t { font-size: 17px; }
+.rate-t span { color: var(--muted); font-size: 14px; margin-left: 10px; }
+.rate-b { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+.rb { font-size: 17px; font-weight: 800; padding: 6px 22px; border-radius: 18px; border: 2px solid #444; color: #ddd; }
+.rb.good.on { background: #2fd07a; border-color: #2fd07a; color: #000; }
+.rb.bad.on { background: #ff7a59; border-color: #ff7a59; color: #000; }
+.rate-alt { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--muted); }
+.rate-alt .alt { width: auto; margin: 0; }
+.rate-alt .alt.on { outline: 2px solid var(--ring); }
+.rate-foot { display: flex; gap: 16px; align-items: center; justify-content: flex-end; margin-top: 14px; }
+.rate-foot .send { font-size: 18px; font-weight: 800; background: var(--ring); color: #000; padding: 8px 26px; border-radius: 20px; }
+.rate-foot .send:disabled { opacity: .4; }
+.rate-foot .ok { color: #7be0a4; font-weight: 700; }
+.rate-foot .ng { color: #ff7a59; font-weight: 700; }
+.modelnote { position: absolute; right: 42px; top: 72px; color: var(--muted); font-size: 13px; }
+.modelnote b { color: #7be0a4; }
 </style>
 </head>
 <body>
