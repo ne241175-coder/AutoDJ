@@ -92,3 +92,22 @@ def test_render_overlap_from_song_start(tmp_path):
 def test_render_api_needs_two_songs():
     r = app.test_client().post("/api/render", json={"songs": [1]})
     assert r.status_code == 400 and "2曲以上" in r.get_json()["error"]
+
+
+def test_relocate_fixes_moved_paths(tmp_path, monkeypatch):
+    """フォルダを移動して DB の絶対パスが古くなっても、data/audio にあるファイルへ付け替える"""
+    from backend import db
+    audio, ana = tmp_path / "audio", tmp_path / "analysis"
+    audio.mkdir(); ana.mkdir()
+    (audio / "x.mp3").write_bytes(b"0")
+    (ana / "1.json").write_text("{}")
+    monkeypatch.setattr(db, "AUDIO_DIR", audio)
+    monkeypatch.setattr(db, "ANALYSIS_DIR", ana)
+    con = db.connect(tmp_path / "t.sqlite3")
+    con.execute("INSERT INTO tracks(title, file_path, added_at, analysis_path) VALUES ('a', '/old/Desktop/AutoDJ/data/audio/x.mp3', 'now', '/old/x/1.json')")
+    con.execute("INSERT INTO tracks(title, file_path, added_at) VALUES ('b', '/old/missing.mp3', 'now')")
+    con.commit()
+    assert db.relocate(con) == 1
+    rows = {r["title"]: r for r in con.execute("SELECT * FROM tracks")}
+    assert rows["a"]["file_path"] == str(audio / "x.mp3") and rows["a"]["analysis_path"] == str(ana / "1.json")
+    assert rows["b"]["file_path"] == "/old/missing.mp3"      # 見つからないものはそのまま

@@ -133,6 +133,23 @@ python -m backend.cli learn-links --reset      # 学習した重みを消して�
 
 答え合わせは「評価1回分（ミックス1回）ずつ外して学習 → 外した評価を当てられたか」で、手で決めた重みの一致率と並べて出します。
 
+## 起動が遅いとき（iCloud）
+
+デスクトップや書類フォルダは iCloud と同期されていることが多く、「Mac のストレージを最適化」がオンだと、
+しばらく使っていないファイル（`.venv` のライブラリや mp3）が Mac から消され、使うたびにダウンロードし直しになります。
+起動や読み込みが極端に遅いときは、プロジェクトを iCloud の外に移してください。
+
+```bash
+mkdir -p ~/dev
+mv ~/Desktop/project/AutoDJ ~/dev/AutoDJ
+cd ~/dev/AutoDJ
+rm -rf .venv && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+python -m backend.app
+```
+
+移動したあと、DB に入っている古い場所は、最初の起動時に `data/audio`・`data/analysis` へ自動で付け替えます。
+移さない場合は、Finder で AutoDJ フォルダを右クリック →「ダウンロードしたままにする」でも改善します。
+
 ## 精度の測り方
 `truth.json` に、聴いて確かめた正解を書いて比較する（分かる項目だけでよい）:
 ```json

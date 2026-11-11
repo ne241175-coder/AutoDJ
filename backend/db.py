@@ -1,7 +1,8 @@
 """SQLite: セット(約10曲の単位)と曲のメタ情報。"""
 import sqlite3
 from datetime import datetime, timezone
-from .config import DB_PATH, GENRES
+from pathlib import Path
+from .config import AUDIO_DIR, ANALYSIS_DIR, DB_PATH, GENRES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sets(
@@ -33,10 +34,36 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_relocated = set()
+
+
+def relocate(con):
+    """フォルダごと移動したとき（例: デスクトップ → ~/dev）に、DB に入っている古い絶対パスを
+    いまの data/audio・data/analysis に付け替える。見つからないファイルだけを直す"""
+    fixed = 0
+    for r in con.execute("SELECT id, file_path, analysis_path FROM tracks").fetchall():
+        upd = {}
+        fp = Path(r["file_path"] or "")
+        if r["file_path"] and not fp.exists() and (AUDIO_DIR / fp.name).exists():
+            upd["file_path"] = str(AUDIO_DIR / fp.name)
+        ap = r["analysis_path"]
+        if ap and not Path(ap).exists() and (ANALYSIS_DIR / Path(ap).name).exists():
+            upd["analysis_path"] = str(ANALYSIS_DIR / Path(ap).name)
+        if upd:
+            con.execute(f"UPDATE tracks SET {', '.join(k + '=?' for k in upd)} WHERE id=?", (*upd.values(), r["id"]))
+            fixed += 1
+    if fixed:
+        con.commit()
+    return fixed
+
+
 def connect(path=DB_PATH):
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    if str(path) not in _relocated:      # プロセスごとに最初の1回だけ確認する
+        _relocated.add(str(path))
+        relocate(con)
     return con
 
 

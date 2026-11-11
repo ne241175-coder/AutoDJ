@@ -121,13 +121,13 @@ export class MixPlayer {
       if (dur <= 0.01) continue;
       const when = abs(Math.max(seg.mixStart, T0));
 
-      // 音量（等パワーのフェード）
+      // 音量（等パワーのフェード）。フェードの曲線と同じ時刻に別の予約を入れると例外になるので、
+      // 曲線が鳴り始めから始まるときは最初の値の予約をしない（曲線の最初の値がそのまま使われる）
       const from = Math.max(seg.mixStart, T0);
-      gain.gain.setValueAtTime(seg.gainAt(from), when);
-      for (const f of [seg.fadeIn, seg.fadeOut]) {
-        if (!f) continue;
+      const fades = [seg.fadeIn, seg.fadeOut].filter((f) => f && f.mixTo - Math.max(f.mixFrom, T0) > 0.002);
+      if (!fades.some((f) => Math.max(f.mixFrom, T0) <= from + 1e-4)) gain.gain.setValueAtTime(seg.gainAt(from), when);
+      for (const f of fades) {
         const a = Math.max(f.mixFrom, T0), b = f.mixTo;
-        if (b <= a) continue;
         const n = Math.max(2, Math.ceil((b - a) * 60));
         const curve = new Float32Array(n);
         for (let k = 0; k < n; k++) curve[k] = seg.gainAt(a + ((b - a) * k) / (n - 1));
@@ -184,7 +184,9 @@ export function computeLayout(plan) {
     const Lout = len(next);
     const posStart = Math.max(0, it.start - Lin);
     const posEnd = it.end;
-    const fadeIn = prev ? { mixFrom: toMix(it.start - Lin), mixTo: toMix(it.start) } : null;
+    // 曲の頭（in が 0 秒付近）から入るときは、in より前に音が無いので、鳴り始め（0 秒）からフェードインする。
+    // フェードの開始を鳴り始めより前にすると、音量の予約（setValueCurveAtTime）が重なって再生が止まる。
+    const fadeIn = prev && it.start - posStart > 0.005 ? { mixFrom: toMix(posStart), mixTo: toMix(it.start) } : null;
     const fadeOut = next ? { mixFrom: toMix(it.end - Lout), mixTo: toMix(it.end) } : null;
     const gainAt = (m) => {
       let g = 1;
