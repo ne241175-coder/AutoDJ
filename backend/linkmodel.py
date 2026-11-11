@@ -38,6 +38,7 @@ PRIOR = 5.0      # 元の重みへの引き戻しの強さ（評価が少ない�
 W_PICK = 1.0     # 候補を選び直した／「こっちが良い」と選んだ
 W_GOOD = 0.5     # 「良い」→ 選ばれなかった候補より良い
 W_BAD = 0.3      # 「微妙」→ 次点の候補の方がましだったかもしれない
+W_RIVAL = 0.8    # お試しで流した候補 と 本来の1位 の比較
 
 
 def vec(features):
@@ -111,6 +112,39 @@ def count_feedback(path=None):
     return len(load_feedback(path))
 
 
+# ---------------------------------------------------------------- お試しモード（バンディット）
+EXPLORE_MAX = 0.5      # 評価が無いうちに、つなぎ目ごとに2位以下を試す確率
+EXPLORE_MIN = 0.1      # 評価が増えても、これくらいは試し続ける
+EXPLORE_HALF = 20      # 評価がこの回数たまると、試す確率が半分くらいになる
+EXPLORE_MARGIN = 0.08  # 1位との点数差がこれ以内の候補だけ試す（明らかに悪い候補は流さない）
+
+
+def explore_rate(n=None):
+    n = count_feedback() if n is None else n
+    return max(EXPLORE_MIN, EXPLORE_MAX * EXPLORE_HALF / (EXPLORE_HALF + n))
+
+
+def pick_explore(plan, keys, fixed=(), rate=None):
+    """つなぎ目ごとに、確率 rate で「1位に点数が近い別の候補」を選ぶ。
+    同じ曲の組み合わせなら、評価が増えるまでは同じ結果になるよう乱数を固定する（設定を変えても揺れない）。
+    戻り値 {つなぎ目の番号: (試す候補, 本来の1位)}"""
+    import random
+    n = count_feedback()
+    rate = explore_rate(n) if rate is None else rate
+    rng = random.Random(f"{list(keys)}|{n}")
+    out = {}
+    for k, t in enumerate(plan["transitions"]):
+        r = rng.random()
+        if k in fixed or t.get("manual") or r >= rate:
+            continue
+        near = [c for c in t.get("alternatives", []) if not c.get("manual") and c.get("features")
+                and c["score"] >= t["score"] - EXPLORE_MARGIN]
+        if near:
+            alt = near[rng.randrange(min(2, len(near)))]       # 2位か3位
+            out[k] = (alt, {"kind": t["kind"], "out": t["out"], "in": t["in"], "features": t.get("features")})
+    return out
+
+
 def pairs_from_feedback(records):
     """評価 → (良い方の特徴, 悪い方の特徴, 重み, まとまりの番号) のリスト
 
@@ -119,6 +153,7 @@ def pairs_from_feedback(records):
     - better があれば: better > chosen（はっきりした選択）
     - good: chosen > others（選ばれなかった候補より良かった）
     - bad で better なし: others の上位2つ > chosen（弱め）
+    - お試し（rival = 本来の1位）: good なら chosen > rival、bad なら rival > chosen（1位と2位の直接比較）
     """
     pairs = []
     for g, rec in enumerate(records):
@@ -129,6 +164,11 @@ def pairs_from_feedback(records):
             others = [o for o in (l.get("others") or []) if o]
             if l.get("better"):
                 pairs.append((l["better"], ch, W_PICK, g))
+            rv = l.get("rival")
+            if rv and l.get("rating") == "good":
+                pairs.append((ch, rv, W_RIVAL, g))
+            elif rv and l.get("rating") == "bad" and not l.get("better"):
+                pairs.append((rv, ch, W_RIVAL, g))
             if l.get("rating") == "good":
                 pairs += [(ch, o, W_GOOD, g) for o in others]
             elif l.get("rating") == "bad" and not l.get("better"):

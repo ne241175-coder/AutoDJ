@@ -214,7 +214,7 @@ def _plan_from(body):
     return build_plan(songs, min_sec=float(body.get("min_sec", 90)), use_sheet=body.get("use_sheet", True),
                       chorus_grace=float(body.get("chorus_grace", 15)), styles=body.get("styles"),
                       links=body.get("links"), match_bpm=body.get("match_bpm", True),
-                      match_key=body.get("match_key", True))
+                      match_key=body.get("match_key", True), explore=bool(body.get("explore", False)))
 
 
 @app.post("/api/plan")
@@ -275,6 +275,7 @@ def feedback():
              "links": [{"k": l.get("k"), "rating": l.get("rating") if l.get("rating") in ("good", "bad") else None,
                         "chosen": clean(l["chosen"]), "better": clean(l.get("better")),
                         "others": [clean(o) for o in (l.get("others") or [])[:6] if o],
+                        "rival": clean(l.get("rival")),
                         "kind": l.get("kind"), "better_kind": l.get("better_kind")} for l in links]}
     linkmodel.record(entry)
     res = linkmodel.learn() if app.config.get("AUTO_LEARN", True) else {"saved": False}
