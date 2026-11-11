@@ -18,7 +18,8 @@ from .config import DATA_DIR
 
 SHEET_DIR = DATA_DIR / "sheet"
 DEFAULT_SHEET_ID = "1tqNzwou98-HD8sY1n_6fh7o9hl4Geh5TA833hjDkch8"
-TABS = {"songs": 633969671, "structure": 1001}   # 曲リスト / 構成入力 の gid
+TABS = {"songs": 633969671, "structure": 1001, "videos": 1003}   # 曲リスト / 構成入力 / 動画URL の gid
+OPTIONAL_TABS = {"videos"}   # 無くても動く
 
 # ラベル → 大分類（推薦や計画で使う）
 ROLE = {
@@ -68,8 +69,13 @@ def fetch_csv(sheet_id=DEFAULT_SHEET_ID, out_dir=SHEET_DIR):
     paths = {}
     for name, gid in TABS.items():
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-        with urllib.request.urlopen(url, timeout=30) as r:
-            data = r.read()
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = r.read()
+        except Exception:
+            if name in OPTIONAL_TABS:
+                continue
+            raise
         if data.lstrip().startswith(b"<"):
             raise RuntimeError("CSVではなくHTMLが返りました。シートを「リンクを知っている全員が閲覧可」にするか、"
                                f"手動で CSV を {out_dir}/{name}.csv に保存してください。")
@@ -148,11 +154,30 @@ def parse_song_list(path):
     return {"songs": songs, "routes": routes}
 
 
+# ---------- 動画URL ----------
+def parse_videos(path):
+    """「動画URL」タブ: 曲名 → YouTube 動画ID。構成入力の秒数を計った動画を入れておけば、推測せずにそれを使う"""
+    from .fetch_songs import video_id_from
+    out = {}
+    if not Path(path).exists():
+        return out
+    for r in _rows(path)[1:]:
+        r = (r + ["", ""])[:2]
+        name, url = r[0].strip(), r[1].strip()
+        if name and url:
+            try:
+                out[name] = video_id_from(url)
+            except ValueError:
+                pass
+    return out
+
+
 def load(sheet_dir=SHEET_DIR):
     """data/sheet/ の CSV を読み、structure.json / songs.json を作って返す"""
     sheet_dir = Path(sheet_dir)
     structure = parse_structure(sheet_dir / "structure.csv")
     lst = parse_song_list(sheet_dir / "songs.csv")
+    lst["videos"] = parse_videos(sheet_dir / "videos.csv")
     (sheet_dir / "structure.json").write_text(json.dumps(structure, ensure_ascii=False, indent=1), encoding="utf-8")
     (sheet_dir / "songs.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), encoding="utf-8")
     return structure, lst

@@ -9,7 +9,7 @@ import csv
 import re
 from pathlib import Path
 
-from .config import AUDIO_DIR
+from .config import ANALYSIS_DIR, AUDIO_DIR
 from .db import connect, get_or_create_set
 from .ingest import _ydl_opts, _register
 from .sheet import SHEET_DIR, load_cached
@@ -18,7 +18,8 @@ BAD_WORDS = re.compile(r"(live|ライブ|cover|カバー|歌ってみた|弾い�
                        r"instrumental|off vocal|short|切り抜き|remix|nightcore|slowed|sped up|piano|replica|"
                        r"dance practice|dance ver|mirrored|staff ver|movie edit|tv size|tv ver|8d|reaction|"
                        r"原曲歌手|[+-]\s?\d\s?key|キー|ガイドメロディ|オルゴール|music box|from [a-z0-9]|オーケストラ|acoustic|"
-                       r"令和ver|re-?record|self cover|セルフカバー)", re.I)
+                       r"令和ver|re-?record|self cover|セルフカバー|432\s?hz|440\s?hz|【mad】|\bmad\b|ボーカル音源|vocal only|"
+                       r"歌割り|パート分け|アカペラ|a ?cappella)", re.I)
 GOOD_WORDS = re.compile(r"(official|music video|公式|provided to youtube)", re.I)
 TOLERANCE = 4.0      # 秒: シートの長さとの許容差
 MIN_DUR_NO_TARGET = 150  # シートに長さがない曲は、短すぎる同名曲を避けるため 2:30 以上に限る
@@ -61,6 +62,10 @@ def score_candidate(entry, target_sec, artist="", song=""):
     # 長さが偶然一致した別の曲（例: 完全感覚Dreamer → Kagerou）を避けるため、
     # 曲名かアーティスト名のどちらかがタイトル／チャンネル名に入っていることを必須にする
     if song and not (match or name_match(entry, song)):
+        return None
+    # シートに長さがある曲で、Topic 以外は曲名がタイトルに入っていることを必須にする
+    # （同じアーティストの別の曲で長さが偶然一致したもの: 完全感覚Dreamer → Kagerou を防ぐ）
+    if song and target_sec and not is_topic(entry) and not name_match(entry, song):
         return None
     s = 0.0
     if target_sec:
@@ -145,6 +150,10 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
             keep = ("manual", "not_found") if reselect else ("manual", "not_found", "downloaded", "already")
             if ov.get("status") not in keep:
                 vid = ""
+            # スプレッドシートの「動画URL」タブ（計測に使った動画）を最優先。sheet-pick の手動指定はさらに優先
+            sheet_vid = lst.get("videos", {}).get(name)
+            if sheet_vid and ov.get("status") != "manual":
+                vid = sheet_vid
             pick = None
             if vid:
                 # 手動指定: タイトルと長さを取りに行って表示する（取れなくてもそのまま使う）
@@ -176,7 +185,8 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
             sheet_len = f"シート {target:.0f}秒" if target else "シートに長さなし"
             topic = " [Topic=アルバム音源]" if is_topic(pick) else ""
             if vid:
-                log(f"○ {name}: 手動指定の動画 https://youtu.be/{vid}（長さはダウンロード時に確認）")
+                src = "シートの動画URL" if vid == lst.get("videos", {}).get(name) else "手動指定"
+                log(f"○ {name}: {src} https://youtu.be/{vid}（長さはダウンロード時に確認）")
             else:
                 log(f"○ {name}: {pick['title']}{topic} ({pick.get('duration')}秒, {sheet_len})")
             status = "selected"
@@ -186,8 +196,17 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
                 con.execute("UPDATE tracks SET title=? WHERE source_id=?", (name, f"yt:{pick['id']}"))
                 con.commit()
             elif not dry_run:
-                info = yd.extract_info(f"https://www.youtube.com/watch?v={pick['id']}", download=True)
+                try:
+                    info = yd.extract_info(f"https://www.youtube.com/watch?v={pick['id']}", download=True)
+                except Exception as e:   # 1曲の失敗で全体を止めない
+                    log(f"   ↳ ダウンロード失敗: {str(e).splitlines()[0][:160]}（もう一度 sheet-fetch すると再挑戦します）")
+                    rows.append({"song": name, "video_id": pick["id"], "title": pick.get("title", ""),
+                                 "duration": pick.get("duration", ""), "sheet_end": target or "",
+                                 "diff": diff, "status": "error"})
+                    _write_rows(rows)
+                    continue
                 path = AUDIO_DIR / f"{info['id']}.mp3"
+                _replace_old(con, name, f"yt:{info['id']}", set_id, log)
                 _register(con, title=name, artist=None, url=info.get("webpage_url"),
                           source_id=f"yt:{info['id']}", path=path, genres=["J-pop"],
                           set_id=set_id, duration=info.get("duration"))
@@ -195,13 +214,38 @@ def fetch_all(only=None, dry_run=False, set_name="sheet", n_results=12, con=None
             rows.append({"song": name, "video_id": pick["id"], "title": pick.get("title", ""),
                          "duration": pick.get("duration", ""), "sheet_end": target or "",
                          "diff": diff, "status": status})
+            _write_rows(rows, keep=overrides)   # 途中で止まっても、そこまでの結果は残す
 
-    SHEET_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SHEET_DIR / "downloads.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["song", "video_id", "title", "duration", "sheet_end", "diff", "status"])
-        w.writeheader()
-        w.writerows(rows)
+    _write_rows(rows)
+    errors = [r["song"] for r in rows if r["status"] == "error"]
+    if errors:
+        log(f"※ ダウンロードに失敗した曲: {', '.join(errors)}（もう一度 sheet-fetch を実行してください）")
     return rows
+
+
+def _write_rows(rows, keep=None):
+    """downloads.csv を書く。keep があれば、まだ処理していない曲の行は元のまま残す"""
+    SHEET_DIR.mkdir(parents=True, exist_ok=True)
+    done = {r["song"] for r in rows}
+    out = list(rows) + [r for n, r in (keep or {}).items() if n not in done]
+    with open(SHEET_DIR / "downloads.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["song", "video_id", "title", "duration", "sheet_end", "diff", "status"],
+                           extrasaction="ignore")
+        w.writeheader()
+        w.writerows(out)
+
+
+def _replace_old(con, title, source_id, set_id, log=print):
+    """同じ曲名で別の動画を取り込み済みなら、その行を消して新しい動画に置き換える（重複させない）"""
+    olds = con.execute("SELECT id, file_path, source_id FROM tracks WHERE title=? AND set_id=? AND source_id<>?",
+                       (title, set_id, source_id)).fetchall()
+    for o in olds:
+        con.execute("DELETE FROM tracks WHERE id=?", (o["id"],))
+        a = ANALYSIS_DIR / f"{o['id']}.json"
+        if a.exists():
+            a.unlink()
+        log(f"   ↳ 以前の動画（{o['source_id']}）を置き換えました")
+    con.commit()
 
 
 def video_id_from(url_or_id):

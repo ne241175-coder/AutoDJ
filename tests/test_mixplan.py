@@ -82,6 +82,18 @@ def test_sheet_parsing():
     assert l["songs"]["前前前世"] == "前前前世 RADWIMPS"
 
 
+def test_video_tab_and_strict_title():
+    from backend.fetch_songs import choose, video_id_from
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "videos.csv").write_text("曲名,動画URL\nリライト,https://youtu.be/omkKMzR_vZY?si=x\n空欄,\n", encoding="utf-8")
+    assert sheet.parse_videos(d / "videos.csv") == {"リライト": "omkKMzR_vZY"}
+    # 長さが一致しても、Topic 以外で曲名がタイトルにない動画は選ばない
+    E = [{"id": "k", "title": "Kagerou", "duration": 248, "channel": "ONE OK ROCK"}]
+    assert choose(E, 248, "ONE OK ROCK", "完全感覚Dreamer") is None
+    assert choose([{"id": "m", "title": "【432Hz】ポリリズム", "duration": 252, "channel": "x"}], 252, "Perfume", "ポリリズム") is None
+
+
 def test_chorus_grace_allows_earlier_exit_only_at_chorus(songs):
     ss = [s for s, _ in songs]
     strict = plan_chain(ss, min_sec=70, chorus_grace=0)
@@ -149,3 +161,25 @@ def test_link_score_is_features_times_weights(songs):
     w = dict(lm.DEFAULT_WEIGHTS, in_start=1.0)
     best = max(candidate_links(a, b, weights=w), key=lambda c: c.score)
     assert best.features["in_start"] == 1.0
+
+
+def test_replace_old_video_and_partial_csv(tmp_path, monkeypatch):
+    import csv as _csv
+    from backend import fetch_songs
+    from backend.db import connect, get_or_create_set
+    con = connect(tmp_path / "t.sqlite3")
+    sid = get_or_create_set(con, "sheet")
+    for src in ("yt:old", "yt:new"):
+        con.execute("INSERT INTO tracks(title, source_id, file_path, genre, set_id, added_at) VALUES (?,?,?,?,?,?)",
+                    ("曲X", src, f"/x/{src}.mp3", "J-pop", sid, "now"))
+    con.execute("DELETE FROM tracks WHERE source_id='yt:new'")
+    monkeypatch.setattr(fetch_songs, "ANALYSIS_DIR", tmp_path)
+    fetch_songs._replace_old(con, "曲X", "yt:new", sid, log=lambda *_: None)
+    assert con.execute("SELECT COUNT(*) FROM tracks WHERE title='曲X'").fetchone()[0] == 0
+    # 途中までの結果を書いても、まだの曲の行は残る
+    monkeypatch.setattr(fetch_songs, "SHEET_DIR", tmp_path)
+    keep = {"B": {"song": "B", "video_id": "bbb", "title": "", "duration": "", "sheet_end": "", "diff": "", "status": "manual"}}
+    fetch_songs._write_rows([{"song": "A", "video_id": "aaa", "title": "", "duration": "", "sheet_end": "",
+                              "diff": "", "status": "error"}], keep=keep)
+    rows = list(_csv.DictReader(open(tmp_path / "downloads.csv", encoding="utf-8")))
+    assert [r["song"] for r in rows] == ["A", "B"] and rows[1]["status"] == "manual"
