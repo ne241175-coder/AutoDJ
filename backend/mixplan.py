@@ -441,11 +441,13 @@ def apply_styles(plan, styles):
 
 
 def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_grace=DEFAULT_CHORUS_GRACE,
-               styles=None, links=None, match_bpm=True, match_key=True):
+               styles=None, links=None, match_bpm=True, match_key=True, explore=False):
     """keys: 曲名 or track_id のリスト（曲順）。シートのつなぎメモがあれば自動で使う。
     use_sheet=False なら、構造もつなぎ位置もすべて自動検知（シートの手入力はお手本として比べるだけ）。
     match_bpm / match_key: 入る曲のテンポ・キーを、出る曲に合わせる（matching.py）。
-    links: {つなぎ目の番号: {"out": 秒, "in": 秒}} 画面で選び直した候補（最優先）"""
+    links: {つなぎ目の番号: {"out": 秒, "in": 秒}} 画面で選び直した候補（最優先）
+    explore: お試しモード。ときどき1位ではなく、点数が近い2位・3位の候補でつなぐ（linkmodel.pick_explore）。
+      1位以外の評価も集まるので、「1位と2位のどちらが良いか」を学べる（強化学習のバンディットの考え方）"""
     con = con or connect()
     structure, lst = ({}, {"routes": []})
     try:
@@ -458,6 +460,21 @@ def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_g
         structure, lst = {}, {"routes": []}
     songs = [load_song(con, k, structure) for k in keys]
     plan = _build(songs, lst, min_sec, chorus_grace, links)
+    explored = {}
+    if explore:
+        from .linkmodel import pick_explore
+        explored = pick_explore(plan, keys, fixed={int(k) for k in (links or {})})
+        if explored:
+            links2 = dict(links or {})
+            for k, (alt, _) in explored.items():
+                links2[str(k)] = {"out": alt["out"], "in": alt["in"], "kind": alt["kind"]}
+            plan = _build(songs, lst, min_sec, chorus_grace, links2)
+            for k, (alt, rival) in explored.items():
+                t = plan["transitions"][k]
+                t.update(manual=False, explored=True, rival={"kind": rival["kind"], "out": rival["out"],
+                                                              "in": rival["in"], "features": rival["features"]})
+    from .linkmodel import explore_rate
+    plan["explore"] = {"on": bool(explore), "n": len(explored), "rate": round(explore_rate(), 3)}
     _attach_reference(plan, songs, sheet_lst, con)
     # BPM とキーを合わせる（入る曲を、いま鳴っている曲に合わせる）
     from .matching import apply_matching

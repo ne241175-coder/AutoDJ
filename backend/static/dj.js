@@ -4,7 +4,7 @@
 // ビルド不要: React UMD + htm。API は backend/app.py、再生は engine.js（mp3 は切らずに秒数指定で鳴らす）。
 import { MixPlayer, loadBuffer, audioContext } from "./engine.js";
 
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useContext, createContext } = React;
 const html = htm.bind(React.createElement);
 
 const W = 1280, H = 832;                     // Figma のフレームサイズ
@@ -106,8 +106,8 @@ function Jacket({ track, size, round, style }) {
   if (!track) return html`<div class=${cls} style=${st}></div>`;
   if (!track.jacket || err) {
     const h = hashHue(track.title);
-    const small = size < 90;   // 小さいときは頭の2文字だけ大きく
-    return html`<div class=${cls + " gen"} style=${{ ...st, fontSize: small ? size * 0.34 : Math.max(10, size * 0.13),
+    const small = size < 90;   // 小さいときは頭の2文字だけ（折り返さない）
+    return html`<div class=${cls + " gen" + (small ? " small" : "")} style=${{ ...st, fontSize: small ? size * 0.3 : Math.max(10, size * 0.13),
       background: `linear-gradient(135deg, hsl(${h},75%,52%), hsl(${(h + 70) % 360},70%,22%))` }}>${small ? [...track.title].slice(0, 2).join("") : track.title}</div>`;
   }
   // 動画サムネイルは 16:9 の上下に黒帯があるので、拡大して正方形に切り取る
@@ -145,6 +145,35 @@ function Loading({ text = "LOADING", sub, progress }) {
 }
 
 // 波形（ピークの棒グラフ）。colorAt(t) で時刻ごとの色、range の外は暗く、progress まで明るく
+// ---------------------------------------------------------------- 右上のメニュー（☰）
+// 画面ごとに中身が変わる。各画面は useMenu() で受け取った ref に項目を入れておく（描画のたびに上書き）。
+// 項目: { label, onClick, disabled, sub }・{ head: "見出し" }・{ info: "文字" }・{ sep: true }
+const MenuCtx = createContext(null);
+const useMenu = () => useContext(MenuCtx);
+
+function Menu({ itemsRef, common, open, setOpen }) {
+  useEffect(() => {
+    if (!open) return;
+    const key = (e) => { if (e.key === "Escape") { setOpen(false); e.stopImmediatePropagation(); e.preventDefault(); } };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, [open]);
+  const items = [...(itemsRef.current || []), ...(common || [])];
+  return html`<div onClick=${(e) => e.stopPropagation()}>
+    <button class=${`hamb${open ? " on" : ""}`} title="メニュー" onClick=${(e) => { e.currentTarget.blur(); setOpen(!open); }}>
+      <i></i><i></i><i></i></button>
+    ${open && html`<div class="menu-veil" onClick=${() => setOpen(false)}></div>`}
+    ${open && html`<div class="menu">
+      ${items.map((it, i) => it.sep ? html`<hr key=${i} />`
+        : it.head ? html`<div key=${i} class="m-head">${it.head}</div>`
+        : it.info ? html`<div key=${i} class="m-info">${it.info}</div>`
+        : html`<button key=${i} class="m-item" disabled=${it.disabled}
+            onClick=${(e) => { e.currentTarget.blur(); if (!it.keepOpen) setOpen(false); it.onClick && it.onClick(); }}>
+            <span>${it.label}</span>${it.sub && html`<em>${it.sub}</em>`}</button>`)}
+    </div>`}
+  </div>`;
+}
+
 function Wave({ peaks, width, height, duration, colorAt, range, progress, onSeek, markers = [] }) {
   const ref = useRef();
   useEffect(() => {
@@ -212,6 +241,7 @@ const WHEEL = {
 const RX = 540, RY = 568;
 
 function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk }) {
+  const menu = useMenu();
   const conf = STEPS[step];
   const G = WHEEL[conf.side];
   const [focus, setFocus] = useState(0);
@@ -250,6 +280,13 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk 
     setTimeout(() => { if (audioRef.current) audioRef.current.currentTime = t; }, 0);
   };
   const choose = (t) => { if (usable(t)) { stopPreview(); onPick(t); } };
+  menu.current = [
+    { head: `${conf.title}（STEP ${step + 1} / 3）` },
+    { label: previewing ? "■ 試聴を止める" : "▶ サビから試聴", sub: "スペース", onClick: preview, disabled: !cur || !cur.file_exists },
+    { label: "この曲に決定", sub: "Enter", onClick: () => choose(cur), disabled: !usable(cur) },
+    ...(step > 0 ? [{ label: "◀ ひとつ前に戻る", onClick: onBack }] : []),
+    { info: "曲の一覧はスクロールか ↑↓ キーで回せます" },
+  ];
 
   const acc = useRef(0);
   const onWheel = (e) => {
@@ -334,7 +371,6 @@ function SelectScreen({ step, options, picks, byTitle, onPick, onBack, routesOk 
     ${step > 0 && html`<button class="back" style=${{ left: G.bigX + 270, top: 756 }} onClick=${onBack}>◀ 戻る</button>`}
     <button class="next" style=${{ left: G.bigX + (step > 0 ? 370 : 300), top: 754 }} disabled=${!usable(cur)} onClick=${() => choose(cur)}>
       決定 <${Tri} size=${44} color=${color} stroke=${4} /></button>
-    <div class="wheel-hint" style=${{ left: G.bigX }}>スクロール / ↑↓ で回す・クリックか Enter で決定・スペースで試聴</div>
   </div>`;
 }
 
@@ -424,7 +460,7 @@ function keyWord(t, mark = false) {
   return mark ? `${d <= 1 ? "◎" : d === 2 ? "○" : "△"} ${w}` : w;
 }
 
-function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previewing }) {
+function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previewing, onReset }) {
   const t = plan.transitions[k];
   const a = plan.items[k], b = plan.items[k + 1];
   const ta = tracksById.get(a.track_id), tb = tracksById.get(b.track_id);
@@ -440,10 +476,11 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
   // 「サビ終わり→サビ頭」を左右に分ける（シートのメモなど「→」が無いときは区間名か「指定の位置」）
   const parts = t.kind.includes("→") ? t.kind.split("→")
     : [ex.out_section ? `${ex.out_section.label}終わり` : "指定の位置", ex.in_section ? `${ex.in_section.label}頭` : "指定の位置"];
-  const nAlt = h && h.nearest ? 2 : 4;
+  const nAlt = (h && h.nearest ? 2 : 4) - (t.explored ? 1 : 0);
   return html`<div class="explain">
     <div class="ex-head">
       <span class="badge" style=${{ background: auto ? "#ffe600" : "#7be0a4" }}>${auto ? "自動検知" : "シートの手入力を使用"}</span>
+      ${t.explored && html`<span class="trytag big" title="学習のため、点数が1位に近い候補を試しています">お試し</span>`}
       <span class="ex-title">つなぎ目 ${k + 1}：<b style=${{ color: PICK[k] }}>${a.title}</b> の <b>${parts[0]}</b>（${fmt(t.out)}）
         → <b style=${{ color: PICK[k + 1] }}>${b.title}</b> の <b>${parts[1]}</b>（${fmt(t.in)}）${t.manual ? "　※シートのメモ／選び直した位置" : ""}</span>
     </div>
@@ -472,8 +509,10 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
           </div>`}
         ${h && html`<div class="why human"><span>人のメモ</span><b>${fmt(h.out)} → ${fmt(h.in)}</b>
           <em>${h.nearest ? `自動の候補で一番近いもの: 差 ${Math.abs(h.nearest.diff_out).toFixed(1)}秒 / ${Math.abs(h.nearest.diff_in).toFixed(1)}秒` : ""}</em></div>`}
+        ${t.explored && t.rival && html`<div class="why"><span>本来の1位</span><b>${fmt(t.rival.out)} → ${fmt(t.rival.in)}</b>
+          <em>${t.rival.kind}<button class="reset" onClick=${() => onUseAlt(k, { out: t.rival.out, in: t.rival.in, kind: t.rival.kind })}>1位に戻す</button></em></div>`}
         <button class="listen-btn" onClick=${() => onPreview(k)}>${previewing ? "■ 止める" : "▶ このつなぎを試聴"}</button>
-        <div class="alts-h">ほかの候補（押すと切り替え）</div>
+        <div class="alts-h">ほかの候補（押すと切り替え）${t.manual && onReset && html`<button class="reset" onClick=${onReset}>自動の1位に戻す</button>`}</div>
         ${(t.alternatives || []).slice(0, nAlt).map((c, i) => html`<button key=${i} class="alt" onClick=${() => onUseAlt(k, c)}>
           <span>${c.kind}</span><b>${fmt(c.out)} → ${fmt(c.in)}</b><em>${c.score.toFixed(2)}</em></button>`)}
         ${h && h.nearest && html`<button class="alt human" onClick=${() => onUseAlt(k, { out: h.nearest.out, in: h.nearest.in, kind: h.nearest.kind })}>
@@ -483,7 +522,9 @@ function Explain({ tracksById, plan, k, auto, styles, onUseAlt, onPreview, previ
   </div>`;
 }
 
-function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec, auto, setAuto, match, setMatch, onBack, onStart, onError }) {
+function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec, auto, setAuto, match, setMatch, explore, setExplore,
+                         onBack, onStart, onError }) {
+  const menu = useMenu();
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const [base, setBase] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -510,13 +551,13 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     setBusy(true);
     const tm = setTimeout(() => {
       post("/api/plan", { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links,
-                          match_bpm: match.bpm, match_key: match.key })
+                          match_bpm: match.bpm, match_key: match.key, explore })
         .then((p) => { alive && setBase(p); })
         .catch((e) => alive && onError(e.message))
         .finally(() => alive && setBusy(false));
     }, 200);
     return () => { alive = false; clearTimeout(tm); };
-  }, [selected.join(","), minSec, auto, JSON.stringify(links), match.bpm, match.key]);
+  }, [selected.join(","), minSec, auto, JSON.stringify(links), match.bpm, match.key, explore]);
   // 音声は先に読み込んでおく（テンポ・キーを合わせた音声はサーバが作るので少し待つ）
   useEffect(() => {
     if (!base) return;
@@ -563,14 +604,37 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
     stopPreview();
   };
 
+  // お試しで選ばれた候補も「選んだ位置」として固定して送る（評価で重みが変わっても、聞いたものと同じ mp3 にする）
+  const frozen = { ...links };
+  if (plan) plan.transitions.forEach((t, k) => { if (t.explored && !frozen[k]) frozen[k] = { out: t.out, in: t.in, kind: t.kind }; });
+  const req = { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links: frozen,
+                match_bpm: match.bpm, match_key: match.key };
+  const ex = plan && plan.explore;
+  const [saveMp3, saving] = useMp3Download(plan ? req : null, onError);
+  const nLinks = Object.keys(links).length;
+  menu.current = [
+    { head: "このミックス" },
+    { label: saving ? "書き出し中…" : "⬇ MP3で保存", sub: "聞かずに書き出す", onClick: saveMp3, disabled: !plan || busy || saving },
+    { label: "候補を自動の1位に戻す", onClick: () => setLinks({}), disabled: nLinks === 0, sub: nLinks ? `${nLinks}件 選び直し中` : "" },
+    { head: "曲の構成" },
+    { label: `${auto ? "● " : "○ "}自動検知`, onClick: () => setAuto(true) },
+    { label: `${!auto ? "● " : "○ "}シートの手入力`, onClick: () => setAuto(false) },
+    { head: "学習" },
+    { label: `お試しモード：${explore ? "ON" : "OFF"}`, onClick: () => setExplore(!explore),
+      sub: ex && ex.on ? `いま ${Math.round(ex.rate * 100)}% の確率` : "時々2位でつなぐ" },
+    { info: "ON のとき、点数が1位に近い2位・3位の候補で時々つなぎます。評価すると「1位と2位のどちらが良いか」を学べます。評価が集まるほど試す回数は減ります。" },
+    { info: plan && plan.model ? `点数の重み：${plan.model.source === "learned"
+      ? `評価から学習（${plan.model.n_feedback}回分）` : `手で決めた値${plan.model.n_feedback ? `（評価 ${plan.model.n_feedback}回分）` : ""}`}` : "" },
+    { sep: true },
+    { label: "◀ 3曲目を選び直す", onClick: onBack },
+  ];
+
   const S = 166, gap = 230, x0 = (W - (3 * S + 2 * gap)) / 2;
   const xOf = (i) => x0 + i * (S + gap);
   const Y = 88;
 
   return html`<div class="screen" onClick=${() => { setOpen(null); }}>
     <div class="h1" style=${{ left: 55, top: 22, fontSize: 38 }}>繋ぎ方を選んでね</div>
-    ${plan && plan.model && html`<div class="modelnote">点数の重み：${plan.model.source === "learned"
-      ? html`<b>評価から学習</b>（${plan.model.n_feedback}回分）` : `手で決めた値${plan.model.n_feedback ? `（評価 ${plan.model.n_feedback}回分）` : ""}`}</div>`}
     <div class="modes" onClick=${(e) => e.stopPropagation()}>
       <button class=${auto ? "on" : ""} onClick=${() => setAuto(true)}>自動検知</button>
       <button class=${!auto ? "on" : ""} onClick=${() => setAuto(false)}>シートの手入力</button>
@@ -593,7 +657,8 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
       return html`<div key=${k} class=${`arrow${sel === k ? " sel" : ""}`} style=${{ left: cx - 90, width: 180, top: Y + 20 }}>
         <button title="繋ぎ方を選ぶ" onClick=${(e) => { e.stopPropagation(); setSel(k); setOpen(open === k ? null : k); }}>
           <${Tri} size=${84} color=${STYLE[st].color} /></button>
-        <div class="lab" style=${{ color: STYLE[st].color }}>${STYLE[st].label}</div>
+        <div class="lab" style=${{ color: STYLE[st].color }}>${STYLE[st].label}${plan && plan.transitions[k] && plan.transitions[k].explored
+          ? html`<span class="trytag">お試し</span>` : ""}</div>
         <button class="seebtn" onClick=${(e) => { e.stopPropagation(); setSel(k); }}>${sel === k ? "▼ 解説中" : "つなぎ目を見る"}</button>
       </div>`;
     })}
@@ -617,7 +682,8 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
       <${Explain} tracksById=${byId} plan=${plan} k=${sel} auto=${auto} styles=${styles}
         previewing=${hover && hover.k === sel && open == null}
         onPreview=${(k) => (hover && hover.k === k ? stopPreview() : playPreview(k))}
-        onUseAlt=${(k, c) => setLinks({ ...links, [k]: { out: c.out, in: c.in, kind: c.kind } })} />
+        onUseAlt=${(k, c) => setLinks({ ...links, [k]: { out: c.out, in: c.in, kind: c.kind } })}
+        onReset=${links[sel] ? () => { const l = { ...links }; delete l[sel]; setLinks(l); } : null} />
     </div>`}
 
     <div class="ctl" style=${{ top: 776, left: 250 }} onClick=${(e) => e.stopPropagation()}>
@@ -626,13 +692,10 @@ function ConnectScreen({ tracks, selected, styles, setStyles, minSec, setMinSec,
       <label><input type="checkbox" checked=${match.bpm} onChange=${(e) => setMatch({ ...match, bpm: e.target.checked })} />BPMを合わせる</label>
       <label><input type="checkbox" checked=${match.key} onChange=${(e) => setMatch({ ...match, key: e.target.checked })} />キーを合わせる</label>
       <span>全体 <b>${layout ? fmt(layout.total) : "-:--"}</b></span>
-      ${Object.keys(links).length > 0 && html`<button class="mini" onClick=${() => setLinks({})}>候補を元に戻す</button>`}
     </div>
     <button class="back" style=${{ left: 40, top: 772 }} onClick=${onBack}>◀ 曲を選び直す</button>
     <button class="next" style=${{ left: 1060, top: 760 }} disabled=${!plan || busy}
-      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan, { picks: picksForFeedback(), auto, songs: selected,
-        req: { songs: selected, min_sec: minSec, chorus_grace: 15, styles, use_sheet: !auto, links,
-               match_bpm: match.bpm, match_key: match.key } }); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
+      onClick=${(e) => { e.stopPropagation(); stopPreview(); onStart(plan, { picks: picksForFeedback(), auto, songs: selected, req }); }}>スタート <${Tri} size=${48} color="#ff3df2" stroke=${4} /></button>
   </div>`;
 }
 
@@ -714,6 +777,7 @@ function RatePanel({ plan, player, meta, onClose, onSave, saving }) {
       const alts = (t.alternatives || []).filter((c) => c.features);
       const b = x.better != null ? alts[x.better] : null;
       return { k, rating: x.rating, chosen: t.features, kind: t.kind, others: alts.slice(0, 4).map((c) => c.features),
+               rival: t.explored && t.rival ? t.rival.features : null,
                better: b ? b.features : null, better_kind: b ? b.kind : null };
     }).filter(Boolean).concat(meta.picks || []);
     try {
@@ -730,7 +794,8 @@ function RatePanel({ plan, player, meta, onClose, onSave, saving }) {
       const alts = (t.alternatives || []).filter((c) => c.features).slice(0, 3);
       return html`<div key=${k} class="rate-row">
         <div class="rate-t"><b style=${{ color: PICK[k] }}>${plan.items[k].title}</b> → <b style=${{ color: PICK[k + 1] }}>${plan.items[k + 1].title}</b>
-          <span>${t.kind}（${fmt(t.out)} → ${fmt(t.in)}）</span></div>
+          <span>${t.kind}（${fmt(t.out)} → ${fmt(t.in)}）</span>
+          ${t.explored && html`<span class="trytag" title="本来の1位と比べて学習します">お試し</span>`}</div>
         <div class="rate-b">
           <button class="mini" onClick=${() => listen(k)}>▶ もう一度聞く</button>
           <button class=${`rb good${x.rating === "good" ? " on" : ""}`} onClick=${() => set(k, { rating: "good", better: null })}>良い</button>
@@ -755,6 +820,7 @@ function RatePanel({ plan, player, meta, onClose, onSave, saving }) {
 }
 
 function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
+  const menu = useMenu();
   const [saveMp3, saving] = useMp3Download(meta && meta.req, onError);
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
   const [now, setNow] = useState(0);
@@ -777,6 +843,17 @@ function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
   const toggle = () => (player.playing ? player.stop() : player.play(ended ? 0 : player.now()));
   const skip = () => { if (nextT != null) player.play(Math.max(player.now(), nextT - 10)); };
   const seekSong = (i) => player.play(Math.max(0, layout.segments[i].mixAnchor - (i ? 10 : 0)));
+  menu.current = [
+    { head: "このミックス" },
+    { label: "★ つなぎ目を評価する", onClick: () => setRating(true) },
+    { label: saving ? "書き出し中…" : "⬇ MP3で保存", onClick: saveMp3, disabled: !(meta && meta.req) || saving },
+    { head: "再生" },
+    { label: playing ? "❚❚ 一時停止" : "▶ 再生", sub: "スペース", onClick: toggle },
+    { label: "次のつなぎ目の手前へ", sub: "→", onClick: skip, disabled: nextT == null || ended },
+    { label: "この曲の頭へ", sub: "←", onClick: () => seekSong(index) },
+    { sep: true },
+    { label: "◀ 繋ぎ方へ戻る", sub: "Esc", onClick: onBack },
+  ];
   useEffect(() => {
     const key = (e) => {
       if (e.key === " ") { toggle(); e.preventDefault(); }
@@ -796,15 +873,12 @@ function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
 
   return html`<div class="screen">
     <button class="back" style=${{ left: 36, top: 20 }} onClick=${onBack}>◀ 繋ぎ方へ</button>
-    <button class="back" style=${{ left: 1110, top: 20 }} onClick=${() => setRating(true)}>★ 評価する</button>
-    ${meta && meta.req && html`<button class="back" style=${{ left: 940, top: 20 }} disabled=${saving} onClick=${saveMp3}
-      title="このミックスを1つの mp3 ファイルとして保存">${saving ? "書き出し中…" : "⬇ MP3で保存"}</button>`}
     <div class="queue">
       ${plan.items.map((x, i) => html`<div key=${i} class=${`q click${i === index ? " on" : ""}`} onClick=${() => seekSong(i)}>
         <${Jacket} track=${byId.get(x.track_id)} size=${56} style=${{ boxShadow: i === index ? `0 0 0 3px ${PICK[i % PICK.length]}` : null }} />
         <div style=${{ minWidth: 0 }}><div class="t">${x.title}</div>
           <div class="s">${fmt(x.start)} → ${fmt(x.end)}</div>
-          ${i < plan.transitions.length && html`<div class="s">↓ ${plan.transitions[i].kind}・${STYLE[plan.transitions[i].style || "auto"].label}</div>`}</div>
+          ${i < plan.transitions.length && html`<div class="s">↓ ${plan.transitions[i].kind}・${STYLE[plan.transitions[i].style || "auto"].label}${plan.transitions[i].explored ? "・お試し" : ""}</div>`}</div>
       </div>`)}
     </div>
 
@@ -820,17 +894,19 @@ function PlayScreen({ tracks, plan, player, meta, onBack, onError }) {
     <div class="nowtitle" style=${{ fontSize: fitFont(it.title, 900, 46) }}>${ended ? "おしまい" : it.title}</div>
     <div class="nowsub">${ended ? "ディスクを押すと最初から" : `${fmt(player.locate(now).pos)} / この曲は ${fmt(it.end)} まで`}</div>
 
-    ${nearT && !ended && html`<div class="joinbar" style=${{ borderColor: STYLE[nearT.style || "auto"].color }}>
-      <span class="badge" style=${{ background: "#ffe600" }}>${nearT.explain && nearT.explain.source === "auto" ? "自動検知" : "シート"}</span>
-      つなぎ目：<b>${plan.items[nearK].title}</b> の ${nearT.kind.includes("→") ? nearT.kind.split("→")[0] : ""}（${fmt(nearT.out)}）→
-      <b>${plan.items[nearK + 1].title}</b> の ${nearT.kind.includes("→") ? nearT.kind.split("→")[1] : ""}（${fmt(nearT.in)}）
-      ${now < layout.transitionsMix[nearK] ? html`<em>あと ${Math.ceil(layout.transitionsMix[nearK] - now)} 秒</em>` : html`<em>つないだ！</em>`}
+    ${nearT && !ended && html`<div class="joinbox" style=${{ borderColor: STYLE[nearT.style || "auto"].color }}>
+      <div class="jb-top"><span><span class="badge" style=${{ background: "#ffe600" }}>${nearT.explain && nearT.explain.source === "auto" ? "自動検知" : "シート"}</span>
+        ${nearT.explored && html`<span class="trytag">お試し</span>`}</span>
+        ${now < layout.transitionsMix[nearK] ? html`<em>あと ${Math.ceil(layout.transitionsMix[nearK] - now)} 秒</em>` : html`<em>つないだ！</em>`}</div>
+      <div class="jb-line"><b style=${{ color: PICK[nearK % 3] }}>${plan.items[nearK].title}</b> の ${nearT.kind.includes("→") ? nearT.kind.split("→")[0] : "指定の位置"}（${fmt(nearT.out)}）</div>
+      <div class="jb-arrow">↓ ${STYLE[nearT.style || "auto"].label}</div>
+      <div class="jb-line"><b style=${{ color: PICK[(nearK + 1) % 3] }}>${plan.items[nearK + 1].title}</b> の ${nearT.kind.includes("→") ? nearT.kind.split("→")[1] : "指定の位置"}（${fmt(nearT.in)}）</div>
     </div>`}
 
     ${tr && !ended && html`<button class="skip" onClick=${skip} title="次のつなぎ目の手前へ（→キー）">
       <${Tri} size=${50} color=${STYLE[tr.style || "auto"].color} /><${Tri} size=${50} color=${STYLE[tr.style || "auto"].color} /><${Tri} size=${50} color=${STYLE[tr.style || "auto"].color} />
     </button>`}
-    ${tr && !ended && html`<div class="upnext">
+    ${tr && !ended && !nearT && html`<div class="upnext">
       <span>次（あと ${fmt(nextT - now)}）</span><b>${plan.items[index + 1].title}</b>
       <span style=${{ color: STYLE[tr.style || "auto"].color, fontWeight: 700 }}>${STYLE[tr.style || "auto"].label}</span>・${tr.kind}
     </div>`}
@@ -855,11 +931,17 @@ function App() {
   const [minSec, setMinSec] = useState(90);
   const [auto, setAuto] = useState(true);       // 発表用: 既定は「自動検知」
   const [match, setMatch] = useState({ bpm: true, key: true });   // BPM・キーを合わせる
+  // お試しモード（時々2位でつなぐ）。ブラウザに覚えておく
+  const [explore, setExploreS] = useState(() => { try { return localStorage.getItem("autodj.explore") !== "0"; } catch (e) { return true; } });
+  const setExplore = (v) => { setExploreS(v); try { localStorage.setItem("autodj.explore", v ? "1" : "0"); } catch (e) { /* なし */ } };
   const [player, setPlayer] = useState(null);
   const [plan, setPlan] = useState(null);
   const [meta, setMeta] = useState(null);       // 評価に添える情報（曲・選び直した候補）
   const [load, setLoad] = useState(null);
   const [err, setErr] = useState(null);
+  const menuRef = useRef([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => setMenuOpen(false), [screen]);
 
   useEffect(() => {
     const t0 = Date.now();
@@ -905,6 +987,12 @@ function App() {
     }
   };
 
+  menuRef.current = [];
+  const common = [
+    { sep: true },
+    ...(screen !== "select" || picks.length ? [{ label: "最初から（1曲目を選び直す）", onClick: () => { if (player) player.stop(); setPicks([]); setScreen("select"); } }] : []),
+    { label: "旧画面（曲ごとの解析を見る）", onClick: () => window.open("/classic", "_blank") },
+  ];
   let body;
   if (screen === "boot") body = html`<${Loading} sub="曲を読み込んでいます" />`;
   else if (screen === "loading") body = html`<${Loading} sub="音源を準備しています" progress=${load ? load.progress : 0} />`;
@@ -914,13 +1002,16 @@ function App() {
     onBack=${() => setPicks(picks.slice(0, -1))} />`;
   else if (screen === "connect") body = html`<${ConnectScreen} tracks=${tracks} selected=${picks.map((t) => t.id)}
     styles=${styles} setStyles=${setStyles} minSec=${minSec} setMinSec=${setMinSec} auto=${auto} setAuto=${setAuto}
-    match=${match} setMatch=${setMatch}
+    match=${match} setMatch=${setMatch} explore=${explore} setExplore=${setExplore}
     onError=${setErr} onBack=${() => { setPicks(picks.slice(0, 2)); setScreen("select"); }} onStart=${start} />`;
   else if (screen === "play" && player) body = html`<${PlayScreen} tracks=${tracks} plan=${plan} player=${player} meta=${meta} onError=${setErr}
     onBack=${() => { player.stop(); setScreen("connect"); }} />`;
 
   return html`<div class="viewport"><div class="stage" style=${{ transform: `translate(-50%, -50%) scale(${scale})` }}>
-    ${body}
+    <${MenuCtx.Provider} value=${menuRef}>
+      ${body}
+      ${screen !== "boot" && screen !== "loading" && html`<${Menu} itemsRef=${menuRef} common=${common} open=${menuOpen} setOpen=${setMenuOpen} />`}
+    </${MenuCtx.Provider}>
     ${err && html`<div class="err">${err}</div>`}
   </div></div>`;
 }

@@ -87,3 +87,29 @@ def test_feedback_api(paths):
     assert len(saved) == 3 and set(saved[0]["links"][0]["chosen"]) <= set(lm.FEATURES)
     g = c.get("/api/feedback").get_json()
     assert g["model"]["source"] == "learned" and set(g["weights"]) == set(lm.FEATURES)
+
+
+def test_rival_pairs_from_explored_link():
+    """お試しで流した候補（2位）の評価は、本来の1位との比較になる"""
+    good = {"links": [{"chosen": CHORUS, "rating": "good", "rival": START}]}
+    bad = {"links": [{"chosen": CHORUS, "rating": "bad", "rival": START}]}
+    assert lm.pairs_from_feedback([good])[0][:3] == (CHORUS, START, lm.W_RIVAL)
+    assert lm.pairs_from_feedback([bad])[0][:3] == (START, CHORUS, lm.W_RIVAL)
+
+
+def test_explore_rate_decreases_and_pick_is_stable(paths):
+    assert lm.explore_rate(0) == pytest.approx(lm.EXPLORE_MAX)
+    assert lm.explore_rate(20) < lm.explore_rate(0) and lm.explore_rate(10_000) == pytest.approx(lm.EXPLORE_MIN)
+    plan = {"transitions": [
+        {"kind": "サビ終わり→サビ頭", "out": 80.0, "in": 40.0, "score": 0.90, "features": CHORUS, "alternatives": [
+            {"kind": "サビ終わり→曲の頭", "out": 80.0, "in": 0.0, "score": 0.88, "features": START},
+            {"kind": "Aメロ終わり→曲の頭", "out": 60.0, "in": 0.0, "score": 0.50, "features": START}]},
+        {"kind": "サビ終わり→サビ頭", "out": 90.0, "in": 30.0, "score": 0.90, "features": CHORUS, "manual": True,
+         "alternatives": [{"kind": "x", "out": 1.0, "in": 1.0, "score": 0.9, "features": START}]}]}
+    ex = lm.pick_explore(plan, [1, 2, 3], rate=1.0)
+    assert set(ex) == {0}                                   # 手で選んだつなぎ目は試さない
+    alt, rival = ex[0]
+    assert alt["score"] >= 0.90 - lm.EXPLORE_MARGIN         # 点数が離れた候補（0.50）は選ばない
+    assert rival["kind"] == "サビ終わり→サビ頭" and rival["features"] == CHORUS
+    assert lm.pick_explore(plan, [1, 2, 3], rate=1.0) == ex           # 同じ曲なら同じ結果
+    assert lm.pick_explore(plan, [1, 2, 3], rate=0.0) == {}

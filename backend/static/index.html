@@ -123,7 +123,7 @@ input[type=text] { cursor: text; }
 .empty-jk { width: 52px; height: 52px; border: 2px dashed; display: grid; place-items: center; color: #777; font-weight: 800; }
 
 /* 繋ぎ方画面: モード切替とつなぎ目の解説 */
-.modes { position: absolute; right: 40px; top: 30px; display: flex; border: 1.5px solid #444; border-radius: 20px; overflow: hidden; }
+.modes { position: absolute; right: 100px; top: 30px; display: flex; border: 1.5px solid #444; border-radius: 20px; overflow: hidden; }
 .modes button { padding: 7px 16px; font-size: 15px; font-weight: 700; color: #999; }
 .modes button.on { background: #ffe600; color: #000; }
 .arrow.sel .lab { text-decoration: underline; text-underline-offset: 4px; }
@@ -148,7 +148,7 @@ input[type=text] { cursor: text; }
 .wv { margin-top: 4px; }
 .pin { position: absolute; top: 20px; height: 62px; }
 .pin i { position: absolute; left: -2px; top: 0; bottom: 0; width: 4px; border-radius: 2px; box-shadow: 0 0 10px currentColor; }
-.pin span { position: absolute; left: 8px; top: 2px; font-size: 12px; font-weight: 800; white-space: nowrap; background: rgba(0,0,0,.75); padding: 0 5px; border-radius: 4px; }
+.pin span { position: absolute; left: 8px; top: 30px; font-size: 12px; font-weight: 800; white-space: nowrap; background: rgba(0,0,0,.75); padding: 0 5px; border-radius: 4px; }
 .link { display: block; }
 .why { display: grid; grid-template-columns: 112px 1fr; column-gap: 8px; row-gap: 0; font-size: 13px; }
 .why span { color: #888; grid-row: span 2; padding-top: 2px; }
@@ -224,6 +224,39 @@ input[type=text] { cursor: text; }
 .rate-foot .ng { color: #ff7a59; font-weight: 700; }
 .modelnote { position: absolute; right: 42px; top: 72px; color: var(--muted); font-size: 13px; }
 .modelnote b { color: #7be0a4; }
+
+/* 右上のメニュー（☰） */
+.hamb { position: absolute; right: 28px; top: 24px; width: 50px; height: 44px; border-radius: 14px; border: 1.5px solid #3a3a3a;
+  background: rgba(10,10,10,.85); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; z-index: 41; }
+.hamb i { display: block; width: 22px; height: 2.5px; border-radius: 2px; background: #ddd; transition: transform .2s, opacity .2s; }
+.hamb:hover, .hamb.on { border-color: var(--ring); }
+.hamb.on i:nth-child(1) { transform: translateY(8.5px) rotate(45deg); }
+.hamb.on i:nth-child(2) { opacity: 0; }
+.hamb.on i:nth-child(3) { transform: translateY(-8.5px) rotate(-45deg); }
+.menu-veil { position: absolute; inset: 0; z-index: 39; background: rgba(0,0,0,.35); }
+.menu { position: absolute; right: 28px; top: 78px; width: 330px; max-height: 720px; overflow: auto; z-index: 40;
+  background: #141414; border: 1.5px solid #333; border-radius: 18px; padding: 10px; box-shadow: 0 18px 50px rgba(0,0,0,.6); }
+.menu .m-head { font-size: 12px; font-weight: 800; color: #888; letter-spacing: .08em; padding: 10px 12px 4px; }
+.menu .m-info { font-size: 13px; color: #9aa; padding: 6px 12px; line-height: 1.5; }
+.menu .m-item { display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 10px; text-align: left;
+  padding: 10px 12px; border-radius: 10px; font-size: 16px; font-weight: 700; color: #eee; }
+.menu .m-item:hover:not(:disabled) { background: #232323; }
+.menu .m-item:disabled { opacity: .35; cursor: default; }
+.menu .m-item em { font-style: normal; font-size: 12px; color: #888; font-weight: 600; white-space: nowrap; }
+.menu hr { border: 0; border-top: 1px solid #2a2a2a; margin: 6px 4px; }
+.jk.gen.small { white-space: nowrap; overflow-wrap: normal; word-break: keep-all; padding: 0; letter-spacing: -.04em; }
+/* 再生中のつなぎ目（右側） */
+.joinbox { position: absolute; left: 975px; top: 400px; width: 280px; border: 2px solid; border-radius: 16px; padding: 12px 14px;
+  background: rgba(0,0,0,.7); font-size: 14px; color: #ccc; line-height: 1.5; }
+.joinbox .jb-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.joinbox em { font-style: normal; color: #ffe600; font-weight: 800; font-size: 16px; }
+.joinbox b { font-size: 15px; }
+.joinbox .jb-arrow { color: #888; font-size: 13px; padding-left: 4px; }
+.alts-h .reset, .why .reset { margin-left: 8px; font-size: 12px; color: var(--ring); text-decoration: underline; }
+.trytag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 800;
+  color: #000; background: #7be0a4; vertical-align: middle; }
+.rate-t .trytag { color: #000; font-size: 11px; margin-left: 8px; }
+.trytag.big { font-size: 12px; margin-left: 10px; }
 </style>
 </head>
 <body>
