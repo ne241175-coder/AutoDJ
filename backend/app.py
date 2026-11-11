@@ -20,6 +20,11 @@ API（UI を差し替えてもこのまま使える）
   GET  /api/feedback            評価の件数と、いま使っている重み（手で決めた値 or 学習した値）
   POST /api/render              /api/plan と同じ指定で、できたミックスを mp3 に書き出してダウンロード
                                  （同じ指定なら data/cache/mix/ に作ったものを使い回す）
+  POST /api/add/lookup          {"url": YouTube} → 動画の題名・長さと、曲名・アーティストの候補（ダウンロードはしない）
+  POST /api/add                 {"url", "title", "artist", "route": [1曲目, 2曲目, 3曲目] | null}
+                                 → 裏で ダウンロード → DB登録 → 解析 → ルート追加。進み具合は GET /api/add
+  POST /api/routes              {"chain": [1曲目, 2曲目, 3曲目]} → 画面からルートを足す（DB の routes）
+  DELETE /api/routes/<id>       画面で足したルートを消す（シートのルートは消せない）
 """
 import json
 import re
@@ -29,7 +34,7 @@ from flask import Flask, abort, jsonify, redirect, request, send_file
 
 from .config import ANALYSIS_DIR, DATA_DIR
 
-from .db import connect
+from .db import add_route, connect, delete_route, list_routes
 from .library import load_analysis, analyze_track
 from .mixplan import build_plan, AUTO_ROLE, ROLE_JA
 from . import linkmodel
@@ -196,15 +201,68 @@ def wave(tid):
 
 @app.get("/api/routes")
 def routes():
+    """シートの「曲リスト」のルート ＋ 画面で足したルート（DB）"""
     con = connect()
     titles = {r["title"]: r["id"] for r in con.execute("SELECT id, title FROM tracks")}
     _, lst = _sheet()
-    out = []
-    for rt in lst.get("routes", []):
+    out, seen = [], set()
+    rows = [{**rt, "source": "sheet"} for rt in lst.get("routes", [])]
+    rows += [{"root": r["root"], "middle": r["middle"], "leaf": r["leaf"], "memo": "", "link_mid_leaf": None,
+              "link_root_mid": None, "source": "app", "route_id": r["id"]} for r in list_routes(con)]
+    for rt in rows:
         chain = [x for x in (rt["root"], rt["middle"], rt["leaf"]) if x]
+        if rt["source"] == "app" and tuple(chain) in seen:
+            continue                          # シートにもある流れは1つにまとめる
+        seen.add(tuple(chain))
         out.append({**rt, "chain": chain, "available": all(c in titles for c in chain),
                     "missing": [c for c in chain if c not in titles]})
     return jsonify(out)
+
+
+@app.post("/api/routes")
+def routes_add():
+    body = request.get_json(force=True) or {}
+    con = connect()
+    try:
+        rid, new = add_route(con, body.get("chain") or [])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "id": rid, "new": new})
+
+
+@app.delete("/api/routes/<int:rid>")
+def routes_delete(rid):
+    if not delete_route(connect(), rid):
+        abort(404)
+    return jsonify({"ok": True})
+
+
+# ---------- 曲を追加（YouTube） ----------
+@app.post("/api/add/lookup")
+def add_lookup():
+    from . import addsong
+    url = ((request.get_json(force=True) or {}).get("url") or "").strip()
+    try:
+        return jsonify(addsong.lookup(url))
+    except (ValueError, RuntimeError) as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.post("/api/add")
+def add_song():
+    from . import addsong
+    b = request.get_json(force=True) or {}
+    try:
+        job = addsong.submit(b.get("url") or "", b.get("title"), b.get("artist"), b.get("route"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(job), 202
+
+
+@app.get("/api/add")
+def add_jobs():
+    from . import addsong
+    return jsonify({"jobs": addsong.jobs()})
 
 
 def _plan_from(body):
