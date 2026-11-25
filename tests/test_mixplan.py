@@ -183,3 +183,48 @@ def test_replace_old_video_and_partial_csv(tmp_path, monkeypatch):
                               "diff": "", "status": "error"}], keep=keep)
     rows = list(_csv.DictReader(open(tmp_path / "downloads.csv", encoding="utf-8")))
     assert [r["song"] for r in rows] == ["A", "B"] and rows[1]["status"] == "manual"
+
+
+def test_parse_structure_new_tab_layout(tmp_path):
+    """「ジャンル横断」シートの「構成」タブ（チェック列あり・メモが7列目）も、以前の並びと同じに読める"""
+    from backend.sheet import parse_structure
+    p = tmp_path / "structure.csv"
+    p.write_text("曲名,ラベル,開始(m:ss),開始(秒)（自動）,終了(秒)（自動）,チェック（自動）,メモ\n"
+                 "曲A,イントロ,0:00,0,21,OK,\n曲A,サビ,0:21,21,50,OK,ラスサビ\n曲A,終了,0:50,50,,OK,\n"
+                 "曲B,A,0:10,10,,最後に「終了」の行を足してください,\n", encoding="utf-8")
+    s = parse_structure(p)
+    assert list(s) == ["曲A"]                       # 終了の無い曲は使わない
+    secs = s["曲A"]["sections"]
+    assert [(x["role"], x["start"], x["end"]) for x in secs] == [("intro", 0, 21), ("chorus", 21, 50)]
+    assert secs[1]["memo"] == "ラスサビ" and s["曲A"]["end"] == 50
+
+
+def test_last_song_also_gets_min_seconds(songs):
+    """最後の曲も、入った位置から min_sec 以上流せる候補を選ぶ（以前は最後の曲だけ短くなることがあった）"""
+    ss = [s for s, _ in songs]
+    plan = plan_chain(ss, min_sec=60, chorus_grace=0)
+    last = plan["items"][-1]
+    assert last["end"] - last["start"] >= 60 - 1e-6, describe(plan)
+    assert not any("に届かず" in w for w in plan["warnings"]), plan["warnings"]
+
+
+def test_manual_link_kept_even_if_last_song_gets_short(songs):
+    """人が決めたつなぎ（シートのつなぎメモ・画面で選んだ位置）は、最後の曲の長さの条件より優先して必ず使う"""
+    ss = [s for s, _ in songs]
+    b = ss[-1]
+    late_in = b.bars[-4]                                   # 最後の曲の終わり近くから入る＝最後の曲は短くなる
+    out_t = ss[-2].bars[len(ss[-2].bars) // 2]
+    k = len(ss) - 2
+    plan = plan_chain(ss, min_sec=60, manual_links={(k, k + 1): {"out": out_t, "in": late_in}})
+    t = plan["transitions"][k]
+    assert t["manual"] and abs(t["out"] - ss[-2].snap(out_t)) < 1e-3 and abs(t["in"] - b.snap(late_in)) < 1e-3
+
+
+def test_human_memo_join_kept_even_if_last_song_gets_short(songs):
+    """人が聞いて決めたつなぎ（シートのつなぎメモ）は、最後の曲が短くなる位置でも、そのまま使う"""
+    ss = [s for s, _ in songs]
+    b, c = ss[1], ss[2]
+    out_t, in_t = b.bars[-12], c.bars[-6]          # 最後の曲は終わり近くから入る（短くなる）
+    plan = plan_chain(ss, min_sec=40, manual_links={(1, 2): {"out": out_t, "in": in_t}})
+    t = plan["transitions"][1]
+    assert t["manual"] and abs(t["out"] - out_t) < 1e-3 and abs(t["in"] - in_t) < 1e-3

@@ -16,6 +16,7 @@
 """
 import argparse
 import sys
+from pathlib import Path
 
 from .config import GENRES
 from .db import connect, normalize_genres
@@ -122,6 +123,36 @@ def cmd_sheet_sync(a):
     print(f"構成入力: {len(structure)} 曲（終了まで入力済み） / 曲リスト: {len(lst['routes'])} 行, 曲 {len(lst['songs'])} 種類")
     n = sum(1 for r in lst["routes"] if r["link_mid_leaf"])
     print(f"つなぎメモ（中間曲→曲名）の秒数を読めた行: {n}")
+
+
+def cmd_sheet_import(a):
+    from .teamsheet import import_new
+    todo, done = import_new(dry_run=a.dry_run)
+    if a.dry_run:
+        print(f"--- 新しい曲 {len(todo)} 曲（--dry-run なので取り込んでいません）")
+    else:
+        print(f"--- {len(done)}/{len(todo)} 曲を取り込みました。続けて structure-draft で構成の下書きを出せます")
+
+
+def cmd_structure_draft(a):
+    from .teamsheet import draft_rows, missing_drafts, to_tsv
+    if a.id:
+        rows, waiting = draft_rows(a.id), []
+    else:
+        rows, waiting = missing_drafts()
+    if waiting:
+        print(f"# 解析がまだの曲（先に sheet-import）: {', '.join(waiting)}", file=sys.stderr)
+    tsv = to_tsv(rows)
+    if a.out:
+        Path(a.out).write_text(tsv + "\n", encoding="utf-8")
+    if a.copy:
+        import subprocess
+        subprocess.run(["pbcopy"], input=tsv.encode("utf-8"), check=True)
+    if not a.out and not a.copy:
+        print(tsv)
+    n = len({r[0] for r in rows})
+    print(f"# {n} 曲・{len(rows)} 行。シートの「構成」タブの一番下の A 列に貼ってください"
+          + ("（クリップボードにコピー済み）" if a.copy else ""), file=sys.stderr)
 
 
 def cmd_sheet_fetch(a):
@@ -284,6 +315,16 @@ def main(argv=None):
     s.add_argument("--sheet-id", default="1tqNzwou98-HD8sY1n_6fh7o9hl4Geh5TA833hjDkch8")
     s.add_argument("--offline", action="store_true", help="data/sheet/*.csv を読み直すだけ")
     s.set_defaults(fn=cmd_sheet_sync)
+
+    s = sub.add_parser("sheet-import", help="「ジャンル横断」シートの曲リストで、まだ無い曲を YouTube から取り込んで解析")
+    s.add_argument("--dry-run", action="store_true", help="取り込む曲を表示するだけ")
+    s.set_defaults(fn=cmd_sheet_import)
+
+    s = sub.add_parser("structure-draft", help="構成が未入力の曲の下書き（自動解析の区切り）を、シートに貼れる形で出す")
+    s.add_argument("--id", type=int, help="この曲だけ（track id）")
+    s.add_argument("--out", help="TSV ファイルに書く")
+    s.add_argument("--copy", action="store_true", help="クリップボードにコピー（mac）")
+    s.set_defaults(fn=cmd_structure_draft)
 
     s = sub.add_parser("sheet-fetch", help="シートの曲を YouTube から一括取り込み（長さが合う動画を自動選択）")
     s.add_argument("--only", nargs="*", help="この曲名だけ")

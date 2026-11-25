@@ -5,6 +5,7 @@ import librosa
 
 from ..config import SR, ONSET_HOP, FEAT_HOP, ANALYZER_VERSION, SCHEMA_VERSION
 from . import rhythm, key as keymod, structure
+from .feel import offbeat_features
 
 
 def _music_bounds(y, sr):
@@ -76,6 +77,8 @@ def analyze_file(path, sr=SR, verbose=False):
             "uncertain_beat_ranges": uncertain,
             "candidates": bpm_cands,
             "half_double": [round(bpm / 2, 2), round(bpm * 2, 2)],
+            # 体感テンポ用（拍の裏で低音がどれだけ鳴っているか。backend/analysis/feel.py）
+            "feel": offbeat_features(y, sr, beats),
         },
         "beats": [round(float(t), 4) for t in beats],
         "meter": db["meter"],

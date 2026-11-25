@@ -50,6 +50,26 @@ def score(features, weights=None):
     return float(sum(w.get(k, 0.0) * float((features or {}).get(k, 0.0)) for k in FEATURES))
 
 
+# 同時には 1つしか立たない手がかり（出る位置・入る位置の種類）
+_EXCLUSIVE = [("out_chorus", "out_outro"), ("in_chorus", "in_start", "in_verse")]
+
+
+def ideal_score(weights=None):
+    """その重みで取りうる一番高い点数（テンポ・キー・勢い・区切りがすべて満点で、一番得な出入りの位置）。
+    「相性 ○%」をこれで割って出す（点数は 1 を超えることがあり、そのまま % にすると上位がみな 100% になる）"""
+    w = weights or current_weights()
+    excl = {k for g in _EXCLUSIVE for k in g}
+    total = sum(max(0.0, w.get(k, 0.0)) for k in FEATURES if k not in excl)
+    total += sum(max(0.0, *(w.get(k, 0.0) for k in g)) for g in _EXCLUSIVE)
+    return total
+
+
+def fit_percent(score_, weights=None):
+    """つなぎ目の点数 → 理想のつなぎに対する割合（0〜1）"""
+    ideal = ideal_score(weights)
+    return min(1.0, max(0.0, score_ / ideal)) if ideal > 0 else 0.0
+
+
 # ---------------------------------------------------------------- 重みの読み込み
 _cache = {"mtime": None, "model": None}
 

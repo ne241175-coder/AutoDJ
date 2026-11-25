@@ -45,6 +45,9 @@ def env(tmp_path, monkeypatch):
     ({"title": "夜の踊り子 / サカナクション", "channel": "サカナクション"}, "夜の踊り子"),
     ({"title": "【MV】踊り子 / Vaundy", "channel": "Vaundy"}, "踊り子"),
     ({"title": "Odoriko", "track": "踊り子", "artist": "Vaundy", "channel": "Vaundy - Topic"}, "踊り子"),
+    ({"title": "BLACKPINK - ‘JUMP’ M/V", "channel": "BLACKPINK"}, "JUMP"),
+    ({"title": 'TWICE "What is Love?" M/V', "channel": "JYP Entertainment"}, "What is Love?"),
+    ({"title": "SOUL'd OUT『ウェカピポ』(HD)", "channel": "SOUL'd OUT"}, "ウェカピポ"),
 ])
 def test_guess_title(info, want):
     assert addsong.guess_title(info)[0] == want

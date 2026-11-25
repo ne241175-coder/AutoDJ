@@ -22,6 +22,7 @@ from .db import connect
 from .library import load_analysis
 
 DEFAULT_MIN_SEC = 90.0
+SHORT_PENALTY = 0.05     # 人が決めたつなぎの前の曲が、最低○秒に 1 秒足りないごとの減点
 
 # 自動解析の役割名 → シートと同じ大分類へ
 AUTO_ROLE = {"intro": "intro", "verse": "verse", "chorus": "chorus", "build": "prechorus",
@@ -178,6 +179,7 @@ class Link:
     reasons: list = field(default_factory=list)
     manual: bool = False
     out_role: str = "chorus"
+    fixed: bool = False      # 人が聞いて決めたつなぎ（必ず使う）。シートの「要確認」の読み取りは False
     features: dict = field(default_factory=dict)
 
 
@@ -229,12 +231,13 @@ def candidate_links(a: Song, b: Song, manual=None, weights=None):
         f = features_at(a, b, manual["out"], manual["in"])
         base = w["tempo"] * f["tempo"] + w["key"] * f["key"]
         links.append(Link(a.snap(manual["out"]), b.snap(manual["in"]), base + 2.0, manual.get("kind", "シートのつなぎメモ"),
-                          why + [manual.get("why", "手動指定")], manual=True, features=f))
+                          why + [manual.get("why", "手動指定")], manual=True, features=f,
+                          fixed=not manual.get("unverified")))
     return links
 
 
 # ---------- 計画 ----------
-def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=DEFAULT_CHORUS_GRACE):
+def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=DEFAULT_CHORUS_GRACE, force=True):
     """songs: [Song...]（曲順固定）。manual_links: {(i, i+1): {"out":秒,"in":秒}}
     1曲は最低 min_sec 秒流す。ただしサビ終わりで出る場合は chorus_grace 秒だけ早く出てよい"""
     manual_links = manual_links or {}
@@ -251,27 +254,50 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=D
         # 必要以上に長く流しすぎない（同点なら短い方）
         return LENGTH_PENALTY * max(0.0, play - min_sec)
 
+    # 人が決めたつなぎ（シートのつなぎメモ・画面で選び直した位置）があるつなぎ目は、それだけを使う。
+    # 「候補」としては残す（画面の「ほかの候補」に出すため）
+    use = [([l for l in c if l.fixed] if force else []) or c for c in cands]
+
+    def short_penalty(l, play):
+        # 人が決めたつなぎは最低○秒を満たさなくても使う。ただし、その前のつなぎ目は
+        # 間の曲がなるべく短くならない候補を選ぶ（以前は 1 秒しか流れないこともあった）
+        return SHORT_PENALTY * max(0.0, required(l) - play) if l.manual else 0.0
+
     # DP: best[i][j] = 最初から i 番目のつなぎに候補 j を使ったときの最大スコア
     best = [np.full(len(c), -np.inf) for c in cands]
     back = [np.full(len(c), -1, dtype=int) for c in cands]
     for j, l in enumerate(cands[0]):
         play = l.out - 0.0
+        if l not in use[0]:
+            continue
         if play >= required(l) or l.manual:
             best[0][j] = l.score - length_penalty(play)
     for i in range(1, n - 1):
         for j, l in enumerate(cands[i]):
+            if l not in use[i]:
+                continue
             for k, p in enumerate(cands[i - 1]):
                 if not np.isfinite(best[i - 1][k]):
                     continue
                 play = l.out - p.inn
                 if play <= 0 or (play < required(l) and not l.manual):
                     continue
-                s = best[i - 1][k] + l.score - length_penalty(play)
+                s = best[i - 1][k] + l.score - length_penalty(play) - short_penalty(l, play)
                 if s > best[i][j]:
                     best[i][j], back[i][j] = s, k
+    # 最後の曲: 入った位置から曲の終わりまで min_sec 流せない候補は、ほかに候補があれば使わない
+    #（以前はここを見ておらず、最後の曲が 70 秒などで終わることがあった）
+    last = songs[-1]
+    last_room = float(last.sections[-1]["end"] or last.duration) if last.sections else last.duration
+    ok_last = np.array([last_room - l.inn >= min_sec or l.manual for l in cands[-1]], dtype=bool)
+    if (np.isfinite(best[-1]) & ok_last).any():
+        best[-1] = np.where(ok_last, best[-1], -np.inf)
     if not np.isfinite(best[-1]).any():
         warnings.append(f"最低 {min_sec:.0f} 秒の条件を満たす組合せがありません。条件を外して計画しました")
-        return plan_chain(songs, min_sec=0.0, manual_links=manual_links, chorus_grace=0.0) if min_sec > 0 else None
+        if min_sec > 0:
+            return plan_chain(songs, min_sec=0.0, manual_links=manual_links, chorus_grace=0.0, force=force)
+        # 人が決めたつなぎ同士がつながらない（前の曲に入る位置より前で出る など）ときだけ、決め打ちをやめる
+        return plan_chain(songs, min_sec=0.0, manual_links=manual_links, chorus_grace=0.0, force=False) if force else None
 
     # 復元
     j = int(np.argmax(best[-1]))
@@ -292,7 +318,7 @@ def plan_chain(songs, min_sec=DEFAULT_MIN_SEC, manual_links=None, chorus_grace=D
             end = last_end(s, start, min_sec)
         need = min_sec - (chorus_grace if (i < n - 1 and chosen[i].out_role == "chorus") else 0.0)
         if end - start < need - 1e-6:
-            warnings.append(f"{s.title}: 再生 {end - start:.0f} 秒（最低 {need:.0f} 秒に届かず）")
+            warnings.append(f"{s.title}: 再生 {math.floor(end - start)} 秒（最低 {need:.0f} 秒に届かず）")
         items.append({"track_id": s.track_id, "title": s.title, "file": s.file, "start": round(start, 3),
                       "end": round(end, 3), "bpm": s.bpm, "camelot": s.camelot,
                       "structure_source": s.structure_source,
@@ -440,6 +466,17 @@ def apply_styles(plan, styles):
     return plan
 
 
+def _n_short(plan):
+    """最低○秒に足りない秒数の合計（_build の warnings「再生 36 秒（最低 75 秒に届かず）」から）"""
+    import re
+    total = 0.0
+    for w in plan.get("warnings", []):
+        m = re.search(r"再生 (\d+) 秒（最低 (\d+) 秒に届かず", w)
+        if m:
+            total += max(0, int(m.group(2)) - int(m.group(1)))
+    return total
+
+
 def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_grace=DEFAULT_CHORUS_GRACE,
                styles=None, links=None, match_bpm=True, match_key=True, explore=False):
     """keys: 曲名 or track_id のリスト（曲順）。シートのつなぎメモがあれば自動で使う。
@@ -456,19 +493,38 @@ def build_plan(keys, min_sec=DEFAULT_MIN_SEC, use_sheet=True, con=None, chorus_g
     except FileNotFoundError:
         pass
     sheet_lst = lst
+    sheet_structure = structure
     if not use_sheet:
-        structure, lst = {}, {"routes": []}
+        # 構造（区間）は自動検知を使う。けれど人が聞いて決めたつなぎ（シートのつなぎメモ）はいつも使う
+        structure = {}
     songs = [load_song(con, k, structure) for k in keys]
+    if not use_sheet:
+        # つなぎメモの秒数は「シートで計った動画」の秒数なので、音源とのズレだけはシートの構成から求めて足す
+        for s in songs:
+            if s.title in sheet_structure:
+                try:
+                    s.sheet_offset = load_song(con, s.track_id, sheet_structure).sheet_offset
+                except (KeyError, RuntimeError):
+                    pass
     plan = _build(songs, lst, min_sec, chorus_grace, links)
     explored = {}
     if explore:
         from .linkmodel import pick_explore
         explored = pick_explore(plan, keys, fixed={int(k) for k in (links or {})})
-        if explored:
+        # お試しの候補は「手で選んだ位置」として渡すので、最低○秒の条件の外になる。
+        # つなぎ目ごとに別々に選ぶと、前後の組合せで間の曲が短くなる（36秒など）ことがあるので、
+        # 元の計画より足りない秒数が増える候補は外す（増えなくなるまで、後ろのつなぎ目から1つずつ）
+        base_short = _n_short(plan)
+        while explored:
             links2 = dict(links or {})
             for k, (alt, _) in explored.items():
                 links2[str(k)] = {"out": alt["out"], "in": alt["in"], "kind": alt["kind"]}
-            plan = _build(songs, lst, min_sec, chorus_grace, links2)
+            trial = _build(songs, lst, min_sec, chorus_grace, links2)
+            if _n_short(trial) <= base_short:
+                plan = trial
+                break
+            explored.pop(max(explored))
+        if explored:
             for k, (alt, rival) in explored.items():
                 t = plan["transitions"][k]
                 t.update(manual=False, explored=True, rival={"kind": rival["kind"], "out": rival["out"],
@@ -531,7 +587,8 @@ def _build(songs, lst, min_sec, chorus_grace, links):
             if link:
                 # つなぎメモもシートの秒数なので、それぞれの曲のズレを足す
                 manual[(i, i + 1)] = {"out": link["out"] + songs[i].sheet_offset,
-                                      "in": link["in"] + songs[i + 1].sheet_offset}
+                                      "in": link["in"] + songs[i + 1].sheet_offset,
+                                      "unverified": bool(link.get("unverified"))}
     for k, v in (links or {}).items():
         manual[(int(k), int(k) + 1)] = {"out": float(v["out"]), "in": float(v["in"]),
                                         "kind": v.get("kind", "選んだ候補"), "why": "画面で選び直し"}
