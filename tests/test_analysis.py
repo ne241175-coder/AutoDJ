@@ -28,6 +28,10 @@ def test_full_pipeline(tmp_path, bpm, tonic, mode):
         assert min(abs(b - f) for f in found) <= 1, (b, found)
     roles = [s["role"] for s in r["structure"]["sections"]]
     assert roles[0] == "intro" and "break" in roles
+    # 体感テンポ: キックが表だけの曲は倍にしない（本当にゆったりした曲を「速い」にしない）
+    from backend.analysis.feel import feel_bpm
+    assert r["tempo"]["feel"]["low_off"] < 0.5
+    assert feel_bpm(r["tempo"]["bpm"], r["tempo"], r["tempo"]["feel"]) == (r["tempo"]["bpm"], False)
 
 
 def _harmonic_only(tonic, mode, bars=8, bar_sec=2.0):

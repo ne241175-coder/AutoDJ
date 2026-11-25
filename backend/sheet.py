@@ -17,8 +17,12 @@ from pathlib import Path
 from .config import DATA_DIR
 
 SHEET_DIR = DATA_DIR / "sheet"
-DEFAULT_SHEET_ID = "1tqNzwou98-HD8sY1n_6fh7o9hl4Geh5TA833hjDkch8"
-TABS = {"songs": 633969671, "structure": 1001, "videos": 1003}   # 曲リスト / 構成入力 / 動画URL の gid
+DEFAULT_SHEET_ID = "1tqNzwou98-HD8sY1n_6fh7o9hl4Geh5TA833hjDkch8"   # 以前のシート（曲リストのルート・動画URL）
+TABS = {"songs": 633969671, "videos": 1003}   # 曲リスト / 動画URL の gid
+# 構成は「ジャンル横断」シートの「構成」タブ（1区切り1行: 曲名・ラベル・開始(m:ss)・…・メモ）
+STRUCTURE_SHEET_ID = "1SMOI6griTSjXyOIc7CdeKpAocG1MnU_Oq_M6fhA658U"
+STRUCTURE_GID = 104
+TEAM_SONGS_GID = 0   # 同じシートの「曲リスト」（曲名・ジャンル・YouTube）→ data/sheet/team_songs.csv
 OPTIONAL_TABS = {"videos"}   # 無くても動く
 
 # ラベル → 大分類（推薦や計画で使う）
@@ -63,12 +67,14 @@ def times_in(text):
 
 
 # ---------- 取得 ----------
-def fetch_csv(sheet_id=DEFAULT_SHEET_ID, out_dir=SHEET_DIR):
+def fetch_csv(sheet_id=DEFAULT_SHEET_ID, out_dir=SHEET_DIR, structure_sheet_id=STRUCTURE_SHEET_ID):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = {}
-    for name, gid in TABS.items():
-        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    tabs = [(name, sheet_id, gid) for name, gid in TABS.items()] + [
+        ("structure", structure_sheet_id, STRUCTURE_GID), ("team_songs", structure_sheet_id, TEAM_SONGS_GID)]
+    for name, sid, gid in tabs:
+        url = f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}"
         try:
             with urllib.request.urlopen(url, timeout=30) as r:
                 data = r.read()
@@ -93,11 +99,20 @@ def _rows(path):
 # ---------- 構成入力 ----------
 def parse_structure(path):
     """戻り値: {曲名: {"sections": [{label, role, start, end, memo}], "end": 秒}}"""
-    rows = _rows(path)[1:]
-    songs = {}
-    for r in rows:
-        r = (r + [""] * 6)[:6]
-        name, label, mmss, sec, _end, memo = (c.strip() for c in r)
+    rows = _rows(path)
+    head = [h.strip() for h in rows[0]] if rows else []
+
+    def col(prefix, default):
+        return next((i for i, h in enumerate(head) if h.startswith(prefix)), default)
+    # 見出しで列を探す（「構成」タブは チェック列があってメモが7列目。以前の「構成入力」タブは6列目）
+    ci = [col("曲名", 0), col("ラベル", 1), col("開始(m:ss)", 2), col("開始(秒)", 3), col("メモ", 5)]
+    songs, drafts, prev = {}, set(), ""
+    for r in rows[1:]:
+        r = r + [""] * (max(ci) + 1 - len(r))
+        name, label, mmss, sec, memo = (r[i].strip() for i in ci)
+        if not name and label:       # 曲名が空欄の行は、上の行と同じ曲（「構成」タブは曲の最初の行だけ曲名を入れる）
+            name = prev
+        prev = name or prev
         if not name or not label:
             continue
         t = parse_time(sec) if sec else parse_time(mmss)
@@ -106,12 +121,17 @@ def parse_structure(path):
         if t is None:
             continue
         song = songs.setdefault(name, {"sections": [], "end": None})
+        if memo.startswith("下書き"):
+            drafts.add(name)
         if label == "終了":
             song["end"] = float(t)
             continue
         song["sections"].append({"label": label, "role": ROLE.get(label, "other"),
                                  "start": float(t), "memo": memo})
     for name, s in list(songs.items()):
+        if any(x["memo"].startswith("下書き") for x in s["sections"]) or name in drafts:
+            songs.pop(name)  # 自動解析の下書き（まだ人が確かめていない）は正解として使わない
+            continue
         secs = sorted(s["sections"], key=lambda x: x["start"])
         for a, b in zip(secs, secs[1:]):
             a["end"] = b["start"]
@@ -172,15 +192,27 @@ def parse_videos(path):
     return out
 
 
-def load(sheet_dir=SHEET_DIR):
-    """data/sheet/ の CSV を読み、structure.json / songs.json を作って返す"""
+def load(sheet_dir=SHEET_DIR, report_change=False):
+    """data/sheet/ の CSV を読み、structure.json / songs.json を作って返す。
+    中身が同じなら書き直さない（書き直すと曲のキャッシュが作り直されるため）。report_change=True なら (構成, 曲リスト, 変わったか)"""
     sheet_dir = Path(sheet_dir)
     structure = parse_structure(sheet_dir / "structure.csv")
     lst = parse_song_list(sheet_dir / "songs.csv")
     lst["videos"] = parse_videos(sheet_dir / "videos.csv")
-    (sheet_dir / "structure.json").write_text(json.dumps(structure, ensure_ascii=False, indent=1), encoding="utf-8")
-    (sheet_dir / "songs.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), encoding="utf-8")
-    return structure, lst
+    changed = False
+    for name, obj in (("structure.json", structure), ("songs.json", lst)):
+        p, text = sheet_dir / name, json.dumps(obj, ensure_ascii=False, indent=1)
+        if not p.exists() or p.read_text(encoding="utf-8") != text:
+            p.write_text(text, encoding="utf-8")
+            changed = True
+    team = sheet_dir / "team_songs.csv"
+    if team.exists():   # 曲リストが変わったら（曲の追加・URL の変更）も「変わった」
+        stamp = sheet_dir / ".team_songs.prev"
+        cur = team.read_text(encoding="utf-8")
+        if not stamp.exists() or stamp.read_text(encoding="utf-8") != cur:
+            stamp.write_text(cur, encoding="utf-8")
+            changed = True
+    return (structure, lst, changed) if report_change else (structure, lst)
 
 
 def load_cached(sheet_dir=SHEET_DIR):

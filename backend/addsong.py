@@ -32,6 +32,10 @@ _NOISE = re.compile(r"(official|music\s*video|lyric|lyrics|audio|video|\bmv\b|\b
                     r"version|hd|4k|live|teaser|short)", re.I)
 
 
+# 「」『』 と、K-POP によくある ‘’ “” ""（' は SOUL'd OUT などの名前に入るので使わない）
+_QUOTED = r"[「『‘“\"](.+?)[」』’”\"]"
+
+
 def _clean_artist(s):
     s = re.sub(r"\s*-\s*Topic$", "", s or "")
     s = re.sub(r"(?i)\s*(official\s*(youtube)?\s*(channel)?|オフィシャル\s*(チャンネル)?|公式\s*(チャンネル)?|"
@@ -50,13 +54,13 @@ def guess_title(info):
     if info.get("track"):                     # 音楽として登録された動画（Topic など）は曲名が付いている
         return info["track"].strip(), artist.split(",")[0].strip()
     t = info.get("title") or ""
-    m = re.search(r"[「『](.+?)[」』]", t)      # 米津玄師 MV「LOSER」 / YOASOBI「アイドル」Official Music Video
+    m = re.search(_QUOTED, t)                 # 米津玄師 MV「LOSER」 / BLACKPINK - ‘JUMP’ M/V / TWICE "What is Love?" M/V
     if m:
         before = re.sub(r"(?i)(【[^】]*】|\bmv\b|\bm/v\b|music\s*video)", "", t[:m.start()]).strip(" -–—/／|｜")
         return m.group(1).strip(), before or artist
     # 【MV】 [Official Music Video] (Lyric Video) などを外す
     t = re.sub(_BRACKETS, lambda x: "" if _NOISE.search(x.group(0)) or len(x.group(0)) <= 4 else x.group(0), t)
-    t = re.sub(r"(?i)\b(official\s+)?(music\s+video|lyric\s+video|mv|audio)\b", "", t).strip(" -–—/／|｜")
+    t = re.sub(r"(?i)\b(official\s+)?(music\s+video|lyric\s+video|m/v|mv|audio)\b", "", t).strip(" -–—/／|｜")
     parts = [p.strip() for p in re.split(r"\s+[-–—/／|｜]\s+|\s*[／｜]\s*", t) if p.strip()]
     if len(parts) >= 2:
         # 「アーティスト - 曲名」でも「曲名 / アーティスト」でも、チャンネル名と一致しない方を曲名にする

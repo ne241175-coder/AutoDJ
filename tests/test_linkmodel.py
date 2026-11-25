@@ -113,3 +113,13 @@ def test_explore_rate_decreases_and_pick_is_stable(paths):
     assert rival["kind"] == "サビ終わり→サビ頭" and rival["features"] == CHORUS
     assert lm.pick_explore(plan, [1, 2, 3], rate=1.0) == ex           # 同じ曲なら同じ結果
     assert lm.pick_explore(plan, [1, 2, 3], rate=0.0) == {}
+
+
+def test_fit_percent_uses_ideal_score():
+    w = dict(lm.DEFAULT_WEIGHTS)
+    # 理想 = テンポ+キー+勢い+区切り + 一番得な出る位置(サビ終わり) + 入る位置(サビ頭/曲頭) + 2回目以降(負なので0)
+    assert abs(lm.ideal_score(w) - (0.30 + 0.30 + 0.25 + 0.15 + 0.08 + 0.06)) < 1e-9
+    # 1 を超える点数でも 100% に張り付かず、差が残る
+    hi, lo = lm.fit_percent(1.0, w), lm.fit_percent(0.8, w)
+    assert 0 < lo < hi < 1
+    assert lm.fit_percent(2.0, w) == 1.0 and lm.fit_percent(-1, w) == 0.0

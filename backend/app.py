@@ -106,11 +106,16 @@ def classic():
 def tracks():
     con = connect()
     structure, _ = _sheet()
+    try:    # 体感 BPM（速い曲を半分で拾っているもの。アンケートと同じ値）
+        from . import recommend
+        feel = {p["id"]: round(p["bpm"]) for p in recommend.library(con)[1] if p.get("bpm_doubled")}
+    except Exception:
+        feel = {}
     out = []
     for r in con.execute("""SELECT t.*, s.name AS set_name FROM tracks t
                             LEFT JOIN sets s ON t.set_id = s.id ORDER BY t.id"""):
         out.append({"id": r["id"], "title": r["title"], "genre": r["genre"], "set": r["set_name"],
-                    "bpm": r["bpm"], "key": r["key_name"], "camelot": r["camelot"],
+                    "bpm": r["bpm"], "feel_bpm": feel.get(r["id"]), "key": r["key_name"], "camelot": r["camelot"],
                     "duration": r["duration"], "analyzed": r["analyzed_at"] is not None,
                     "has_sheet_structure": r["title"] in structure,
                     "artist": r["artist"], "video_id": _video_id(r),
@@ -245,16 +250,41 @@ def routes_delete(rid):
 def survey():
     from . import recommend
     _, profs = recommend.library()
-    return jsonify({"questions": recommend.QUESTIONS, "counts": recommend.choice_counts(profs), "n_songs": len(profs)})
+    return jsonify({"questions": recommend.questions(profs), "counts": recommend.choice_counts(profs), "n_songs": len(profs)})
 
 
 @app.post("/api/survey")
 def survey_answer():
     from . import recommend
-    answers = (request.get_json(force=True) or {}).get("answers") or {}
+    body = request.get_json(force=True) or {}
+    answers = body.get("answers") or {}
     _, profs = recommend.library()
-    return jsonify({"roots": recommend.pick_roots(answers, profs), "n_exact": recommend.n_exact(answers, profs),
-                    "n_songs": len(profs)})
+    return jsonify({"roots": recommend.pick_roots(answers, profs, seed=str(body.get("seed") or "")[:40] or None), "n_exact": recommend.n_exact(answers, profs),
+                    "counts": recommend.choice_counts(profs, answers), "n_songs": len(profs)})
+
+
+@app.get("/api/sync")
+def sync_status():
+    """シートとの自動同期のようす（version が変わったら画面は曲の一覧を読み直す）"""
+    from . import autosync
+    return jsonify(autosync.status())
+
+
+@app.post("/api/sync")
+def sync_now():
+    from . import autosync
+    return jsonify(autosync.run_once())
+
+
+@app.get("/api/structure_draft/<int:tid>")
+def structure_draft(tid):
+    """自動解析の区切りを、シートの「構成」タブに貼れる TSV で（メモは「下書き」）"""
+    from .teamsheet import draft_rows, to_tsv
+    try:
+        rows = draft_rows(tid)
+    except (KeyError, RuntimeError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"tsv": to_tsv(rows), "rows": len(rows)})
 
 
 @app.get("/api/next")
@@ -262,7 +292,12 @@ def next_songs():
     from . import recommend
     try:
         exclude = [int(x) for x in (request.args.get("exclude") or "").split(",") if x.strip()]
-        return jsonify(recommend.recommend_next(int(request.args["after"]), exclude))
+        try:    # アンケートの答え（JSON）。あれば2・3曲目もその希望に寄せる
+            answers = json.loads(request.args.get("answers") or "{}")
+            answers = answers if isinstance(answers, dict) else {}
+        except ValueError:
+            answers = {}
+        return jsonify(recommend.recommend_next(int(request.args["after"]), exclude, answers=answers))
     except (KeyError, ValueError) as e:
         return jsonify({"error": f"おすすめを出せません: {e.args[0] if e.args else e}"}), 400
 
@@ -392,6 +427,10 @@ def main():
     p.add_argument("--port", type=int, default=5050)
     a = p.parse_args()
     print(f"AutoDJ: http://localhost:{a.port}  （終了は Ctrl+C）")
+    from . import autosync
+    if autosync.INTERVAL_MIN > 0:
+        print(f"シートを {autosync.INTERVAL_MIN:g} 分ごとに取り込みます（新しい曲は自動でダウンロード・解析。AUTODJ_SYNC_MIN=0 で止める）")
+    autosync.start()
     app.run(host="127.0.0.1", port=a.port, debug=False, threaded=True)
 
 
